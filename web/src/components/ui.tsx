@@ -1,6 +1,6 @@
-import { X } from "lucide-react"
+import { Check, ChevronDown, X } from "lucide-react"
 import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react"
-import { useEffect, useId, useRef } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 
 export function Button({ className = "", variant = "primary", type = "button", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" | "danger" }) {
   return <button type={type} className={`button button--${variant} ${className}`} {...props} />
@@ -30,6 +30,21 @@ export function Switch({ checked, onChange, label }: { checked: boolean; onChang
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`switch ${checked ? "switch--on" : ""}`} onClick={() => onChange(!checked)}><span /></button>
 }
 
+export function SelectMenu({ value, options, onChange, label, compact = false }: { value: string; options: { value: string; label: string; description?: string }[]; onChange: (value: string) => void; label: string; compact?: boolean }) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  const selected = options.find((option) => option.value === value) ?? options[0]
+  useEffect(() => {
+    const close = (event: MouseEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
+    window.addEventListener("mousedown", close)
+    return () => window.removeEventListener("mousedown", close)
+  }, [])
+  return <div ref={root} className={`select-menu ${compact ? "select-menu--compact" : ""}`}>
+    <Button variant="secondary" className="select-menu__trigger" aria-haspopup="listbox" aria-expanded={open} aria-label={label} onClick={() => setOpen((current) => !current)}><span><strong>{selected?.label ?? "Выберите"}</strong>{selected?.description && <small>{selected.description}</small>}</span><ChevronDown className={open ? "select-menu__chevron select-menu__chevron--open" : "select-menu__chevron"} /></Button>
+    {open && <div className="select-menu__popover" role="listbox" aria-label={label}>{options.map((option) => <button type="button" role="option" aria-selected={option.value === value} key={option.value} onClick={() => { onChange(option.value); setOpen(false) }}><span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>{option.value === value && <Check />}</button>)}</div>}
+  </div>
+}
+
 export function Dialog({ title, description, children, onClose, wide = false }: { title: string; description?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(onClose)
@@ -43,7 +58,7 @@ export function Dialog({ title, description, children, onClose, wide = false }: 
       if (dialogs.at(-1) !== ref.current) return
       if (event.key === "Escape") onCloseRef.current()
       if (event.key === "Tab" && ref.current) {
-        const items = [...ref.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+        const items = [...ref.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')]
         if (!items.length) return
         const first = items[0], last = items[items.length - 1]
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }

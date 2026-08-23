@@ -22,3 +22,14 @@
 9. Manual on-demand backend probe from every node and compact revision difference summaries — implemented.
 
 Remote enrollment must require HTTPS (or an explicit test-only insecure mode). Do not send enrollment or node credentials over unprotected public HTTP.
+
+## Beta gate
+
+Alpha.7 is the UI/stabilization release. A beta tag requires all of the following on disposable VPS infrastructure:
+
+1. Panel upgrade with database preservation and rollback verified.
+2. At least two remote nodes connected over HTTPS for 72 hours without reconciliation drift.
+3. UDP idle/resume, TCP forwarding, dual protocol, affinity, weighted distribution and ICMP failover checks passed.
+4. Node credential rotation/revocation and profile rollback tested end to end.
+5. Reboot recovery tested for the panel and every node.
+6. Backup/restore rehearsal completed before using a primary server.

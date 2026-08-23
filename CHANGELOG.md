@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-alpha.7
+
+- Replaced the oversized Affinity panel with a compact custom dropdown and optional custom-seconds field.
+- Replaced native profile/scheduler selects with the shared EzhikLB dropdown component.
+- Replaced browser prompts for node editing and profile cloning with proper panel dialogs.
+- Fixed backend switch alignment and constrained dialogs to the viewport without horizontal overflow.
+- Increased small labels, metadata, helpers, table values and navigation text throughout the panel.
+
 ## 0.1.0-alpha.6
 
 - Fixed the rule-editor field grid and increased small text throughout the panel.

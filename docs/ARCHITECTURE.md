@@ -57,4 +57,4 @@ credential is displayed once and rotation invalidates the previous value.
 
 Remote traffic must use HTTPS. Plain HTTP is accepted only for loopback or when
 `EZHIKLB_ALLOW_INSECURE=1` is explicitly enabled in an isolated test setup.
-mTLS remains a future hardening layer and is not required for alpha.6 operation.
+mTLS remains a future hardening layer and is not required for alpha.7 operation.
