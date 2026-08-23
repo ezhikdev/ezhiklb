@@ -62,6 +62,11 @@ func (m *HealthMonitor) Reset() {
 	m.results = map[string]domain.BackendHealth{}
 }
 
+func (m *HealthMonitor) CheckNow(ctx context.Context, config domain.HealthCheck, services []Service) {
+	if !config.Enabled { return }
+	m.checkAll(ctx, config, services)
+}
+
 func (m *HealthMonitor) checkAll(ctx context.Context, config domain.HealthCheck, services []Service) {
 	addresses := map[string]bool{}
 	for _, service := range services {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-alpha.5"
+EZHIKLB_VERSION="0.1.0-alpha.6"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -67,7 +67,8 @@ choose_role
 case "$ROLE" in panel|node|panel-node) ;; *) die "EZHIKLB_ROLE must be panel, node, or panel-node" ;; esac
 if [[ "$ROLE" == "node" ]]; then
   [[ -n "${EZHIKLB_PANEL_URL:-}" ]] || die "node-only installation requires EZHIKLB_PANEL_URL"
-  [[ ${#EZHIKLB_AGENT_TOKEN} -ge 24 ]] || die "node-only installation requires EZHIKLB_AGENT_TOKEN from the panel"
+  agent_token_input="${EZHIKLB_AGENT_TOKEN:-}"
+  [[ ${#agent_token_input} -ge 24 ]] || die "node-only installation requires EZHIKLB_AGENT_TOKEN from the panel"
   [[ -n "${EZHIKLB_NODE_ID:-}" ]] || die "node-only installation requires EZHIKLB_NODE_ID"
 fi
 
@@ -137,6 +138,7 @@ EZHIKLB_ADMIN_TOKEN=${admin_token}
 EZHIKLB_AGENT_TOKEN=${agent_token}
 EZHIKLB_NODE_ID=${EZHIKLB_NODE_ID:-local}
 EZHIKLB_PANEL_URL=${panel_url}
+EZHIKLB_ALLOW_INSECURE=${EZHIKLB_ALLOW_INSECURE:-0}
 EZHIKLB_AGENT_STATE=${AGENT_DATA_DIR}/state.json
 EZHIKLB_LEGACY_CONFIG=${legacy_config}
 EOF

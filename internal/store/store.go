@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -73,6 +74,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS node_credentials (
+			node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			rotated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS node_probe_requests (
+			node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+			nonce INTEGER NOT NULL DEFAULT 0
+		)`,
 		`CREATE TABLE IF NOT EXISTS audit_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			action TEXT NOT NULL,
@@ -113,6 +124,17 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func newToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil { return "", err }
+	return hex.EncodeToString(buf), nil
+}
+
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func NewID(prefix string) (string, error) {
@@ -279,6 +301,52 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 	return profile, domain.Revision{ID: revisionID, ProfileID: profileID, Number: next, Config: config, CreatedAt: now}, err
 }
 
+func (s *Store) ListRevisions(ctx context.Context, profileID string) ([]domain.Revision, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,profile_id,number,config_json,created_at FROM profile_revisions WHERE profile_id=? ORDER BY number DESC`, profileID)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	result := make([]domain.Revision, 0)
+	for rows.Next() {
+		var item domain.Revision
+		var configJSON, created string
+		if err := rows.Scan(&item.ID, &item.ProfileID, &item.Number, &configJSON, &created); err != nil { return nil, err }
+		if err := json.Unmarshal([]byte(configJSON), &item.Config); err != nil { return nil, err }
+		item.CreatedAt, err = parseTime(created)
+		if err != nil { return nil, err }
+		result = append(result, item)
+	}
+	if len(result) == 0 { return nil, ErrNotFound }
+	return result, rows.Err()
+}
+
+func (s *Store) RollbackProfile(ctx context.Context, profileID string, number int64) (domain.Profile, domain.Revision, error) {
+	profile, _, err := s.GetProfile(ctx, profileID)
+	if err != nil { return domain.Profile{}, domain.Revision{}, err }
+	target, err := s.getRevision(ctx, profileID, number)
+	if err != nil { return domain.Profile{}, domain.Revision{}, err }
+	profile, revision, err := s.PublishRevision(ctx, profileID, profile.Name, profile.Description, target.Config)
+	if err == nil { _ = s.Audit(ctx, "profile.rolled_back", "profile", profileID, map[string]any{"from_revision": number, "new_revision": revision.Number}) }
+	return profile, revision, err
+}
+
+func (s *Store) CloneProfile(ctx context.Context, profileID, name string) (domain.Profile, domain.Revision, error) {
+	profile, revision, err := s.GetProfile(ctx, profileID)
+	if err != nil { return domain.Profile{}, domain.Revision{}, err }
+	if name == "" { name = profile.Name + " — копия" }
+	return s.CreateProfile(ctx, name, profile.Description, revision.Config)
+}
+
+func (s *Store) DeleteProfile(ctx context.Context, profileID string) error {
+	var assigned int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE profile_id=?`, profileID).Scan(&assigned); err != nil { return err }
+	if assigned > 0 { return fmt.Errorf("profile is assigned to %d node(s)", assigned) }
+	result, err := s.db.ExecContext(ctx, `DELETE FROM profiles WHERE id=?`, profileID)
+	if err != nil { return err }
+	affected, _ := result.RowsAffected()
+	if affected == 0 { return ErrNotFound }
+	return s.Audit(ctx, "profile.deleted", "profile", profileID, map[string]any{})
+}
+
 func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
 	rows, err := s.db.QueryContext(ctx, nodeSelect+` ORDER BY name`)
 	if err != nil {
@@ -291,12 +359,78 @@ func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		if node.LastSeenAt == nil || time.Since(*node.LastSeenAt) > 45*time.Second {
+		if node.Status != "disabled" && (node.LastSeenAt == nil || time.Since(*node.LastSeenAt) > 45*time.Second) {
 			node.Status = "offline"
 		}
 		nodes = append(nodes, node)
 	}
 	return nodes, rows.Err()
+}
+
+func (s *Store) CreateNode(ctx context.Context, name, ingressAddress, profileID string) (domain.Node, string, error) {
+	var revision int64
+	if err := s.db.QueryRowContext(ctx, `SELECT current_revision FROM profiles WHERE id=?`, profileID).Scan(&revision); errors.Is(err, sql.ErrNoRows) { return domain.Node{}, "", ErrNotFound } else if err != nil { return domain.Node{}, "", err }
+	id, err := NewID("nod")
+	if err != nil { return domain.Node{}, "", err }
+	token, err := newToken()
+	if err != nil { return domain.Node{}, "", err }
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil { return domain.Node{}, "", err }
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, id, name, ingressAddress, profileID, revision, "offline", formatTime(now), formatTime(now)); err != nil { return domain.Node{}, "", err }
+	if _, err = tx.ExecContext(ctx, `INSERT INTO node_credentials(node_id,token_hash,created_at,rotated_at) VALUES(?,?,?,?)`, id, tokenHash(token), formatTime(now), formatTime(now)); err != nil { return domain.Node{}, "", err }
+	if err = auditTx(ctx, tx, "node.created", "node", id, map[string]any{"profile_id": profileID}); err != nil { return domain.Node{}, "", err }
+	if err = tx.Commit(); err != nil { return domain.Node{}, "", err }
+	return domain.Node{ID:id, Name:name, IngressAddress:ingressAddress, ProfileID:profileID, DesiredRevision:revision, Status:"offline", CreatedAt:now, UpdatedAt:now}, token, nil
+}
+
+func (s *Store) ValidateNodeCredential(ctx context.Context, nodeID, token string) bool {
+	var expected string
+	if err := s.db.QueryRowContext(ctx, `SELECT token_hash FROM node_credentials WHERE node_id=?`, nodeID).Scan(&expected); err != nil { return false }
+	return expected == tokenHash(token)
+}
+
+func (s *Store) RotateNodeCredential(ctx context.Context, nodeID string) (string, error) {
+	token, err := newToken()
+	if err != nil { return "", err }
+	now := formatTime(time.Now().UTC())
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=? AND id<>'local'`, nodeID).Scan(&exists); err != nil { return "", err }
+	if exists == 0 { return "", ErrNotFound }
+	_, err = s.db.ExecContext(ctx, `INSERT INTO node_credentials(node_id,token_hash,created_at,rotated_at) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET token_hash=excluded.token_hash,rotated_at=excluded.rotated_at`, nodeID, tokenHash(token), now, now)
+	if err != nil { return "", err }
+	_, _ = s.db.ExecContext(ctx, `UPDATE nodes SET status='offline',last_error='',updated_at=? WHERE id=?`, now, nodeID)
+	_ = s.Audit(ctx, "node.credential_rotated", "node", nodeID, map[string]any{})
+	return token, nil
+}
+
+func (s *Store) RevokeNodeCredential(ctx context.Context, nodeID string) error {
+	if nodeID == "local" { return errors.New("local node credential cannot be revoked") }
+	result, err := s.db.ExecContext(ctx, `DELETE FROM node_credentials WHERE node_id=?`, nodeID)
+	if err != nil { return err }
+	affected, _ := result.RowsAffected()
+	if affected == 0 { return ErrNotFound }
+	_, err = s.db.ExecContext(ctx, `UPDATE nodes SET status='disabled',updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), nodeID)
+	if err != nil { return err }
+	return s.Audit(ctx, "node.credential_revoked", "node", nodeID, map[string]any{})
+}
+
+func (s *Store) UpdateNode(ctx context.Context, nodeID, name, ingressAddress string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET name=?,ingress_address=?,updated_at=? WHERE id=?`, name, ingressAddress, formatTime(time.Now().UTC()), nodeID)
+	if err != nil { return err }
+	affected, _ := result.RowsAffected()
+	if affected == 0 { return ErrNotFound }
+	return s.Audit(ctx, "node.updated", "node", nodeID, map[string]any{"name": name, "ingress_address": ingressAddress})
+}
+
+func (s *Store) DeleteNode(ctx context.Context, nodeID string) error {
+	if nodeID == "local" { return errors.New("local node cannot be deleted") }
+	result, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, nodeID)
+	if err != nil { return err }
+	affected, _ := result.RowsAffected()
+	if affected == 0 { return ErrNotFound }
+	return s.Audit(ctx, "node.deleted", "node", nodeID, map[string]any{})
 }
 
 func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) error {
@@ -322,11 +456,12 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 	var result domain.NodeDesiredState
 	var configJSON string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,r.config_json
+		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),r.config_json
 		FROM nodes n
 		JOIN profiles p ON p.id=n.profile_id
 		JOIN profile_revisions r ON r.profile_id=p.id AND r.number=n.desired_revision
-		WHERE n.id=?`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &configJSON)
+		LEFT JOIN node_probe_requests q ON q.node_id=n.id
+		WHERE n.id=?`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrNotFound
 	}
@@ -337,6 +472,17 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 		return result, err
 	}
 	return result, nil
+}
+
+func (s *Store) RequestHealthProbe(ctx context.Context, nodeID string) (int64, error) {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, nodeID).Scan(&exists); err != nil { return 0, err }
+	if exists == 0 { return 0, ErrNotFound }
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO node_probe_requests(node_id,nonce) VALUES(?,1) ON CONFLICT(node_id) DO UPDATE SET nonce=nonce+1`, nodeID); err != nil { return 0, err }
+	var nonce int64
+	if err := s.db.QueryRowContext(ctx, `SELECT nonce FROM node_probe_requests WHERE node_id=?`, nodeID).Scan(&nonce); err != nil { return 0, err }
+	_ = s.Audit(ctx, "node.health_probe_requested", "node", nodeID, map[string]any{"nonce": nonce})
+	return nonce, nil
 }
 
 func (s *Store) Heartbeat(ctx context.Context, nodeID, version string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat) error {

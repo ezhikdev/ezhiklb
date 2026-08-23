@@ -20,7 +20,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-alpha.5"
+const version = "0.1.0-alpha.6"
 
 type client struct {
 	baseURL string
@@ -32,6 +32,10 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	nodeID := env("EZHIKLB_NODE_ID", "local")
 	panelURL := strings.TrimRight(env("EZHIKLB_PANEL_URL", "http://127.0.0.1:8080"), "/")
+	if strings.HasPrefix(panelURL, "http://") && panelURL != "http://127.0.0.1:8080" && panelURL != "http://localhost:8080" && env("EZHIKLB_ALLOW_INSECURE", "0") != "1" {
+		logger.Error("remote panel URL must use HTTPS; set EZHIKLB_ALLOW_INSECURE=1 only on an isolated test environment", "panel_url", panelURL)
+		os.Exit(1)
+	}
 	token := os.Getenv("EZHIKLB_AGENT_TOKEN")
 	if len(token) < 24 {
 		logger.Error("EZHIKLB_AGENT_TOKEN must contain at least 24 characters")
@@ -49,6 +53,7 @@ func main() {
 	defer desiredPoll.Stop()
 	defer heartbeatPoll.Stop()
 	var applied int64
+	var lastHealthProbe int64
 	var applyError string
 	var healthCancel context.CancelFunc
 	var healthMu sync.Mutex
@@ -63,7 +68,7 @@ func main() {
 		}
 	}
 	reconcile := func() bool {
-		desired, changed, err := api.desired(ctx, nodeID, applied)
+		desired, changed, err := api.desired(ctx, nodeID, applied, lastHealthProbe)
 		if err != nil {
 			logger.Error("fetch desired state", "error", err)
 			return false
@@ -71,6 +76,8 @@ func main() {
 		if !changed {
 			return false
 		}
+		probeRequested := desired.HealthProbe != lastHealthProbe
+		lastHealthProbe = desired.HealthProbe
 		if desired.Revision != applied {
 			logger.Info("applying desired revision", "revision", desired.Revision, "profile", desired.ProfileName)
 			if err := reconciler.Reconcile(ctx, desired); err != nil {
@@ -91,6 +98,11 @@ func main() {
 				go monitor.Run(healthCtx, desired.Config.HealthCheck, reconciler.Services)
 				return true
 			}
+		}
+		if probeRequested && desired.Revision == applied {
+			monitor.CheckNow(ctx, desired.Config.HealthCheck, reconciler.Services())
+			logger.Info("manual health probe completed", "probe", desired.HealthProbe)
+			return true
 		}
 		return false
 	}
@@ -116,14 +128,14 @@ func main() {
 	}
 }
 
-func (c *client) desired(ctx context.Context, nodeID string, knownRevision int64) (domain.NodeDesiredState, bool, error) {
+func (c *client) desired(ctx context.Context, nodeID string, knownRevision, knownHealthProbe int64) (domain.NodeDesiredState, bool, error) {
 	var result domain.NodeDesiredState
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/v1/nodes/"+nodeID+"/desired", nil)
 	if err != nil {
 		return result, false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
-	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d"`, knownRevision))
+	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d-probe-%d"`, knownRevision, knownHealthProbe))
 	response, err := c.http.Do(request)
 	if err != nil {
 		return result, false, err

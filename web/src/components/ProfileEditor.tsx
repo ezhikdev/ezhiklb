@@ -1,4 +1,4 @@
-import { ArrowRight, Copy, Pencil, Plus, Server, Trash2 } from "lucide-react"
+import { ArrowRight, Copy, Info, Pencil, Plus, Server, Trash2 } from "lucide-react"
 import { useMemo, useState } from "react"
 import type { Backend, BackendHealth, Listener, ProfileConfig, Protocol } from "../types"
 import { Badge, Button, Card, Dialog, Field, Input, Switch } from "./ui"
@@ -17,6 +17,16 @@ const newListener = (): Listener => ({
 })
 
 type ListenerErrors = Record<string, string>
+
+const affinityPresets = [
+  { value: 0, label: "Выключено" },
+  { value: 900, label: "15 минут" },
+  { value: 1800, label: "30 минут" },
+  { value: 3600, label: "1 час" },
+  { value: 10800, label: "3 часа" },
+  { value: 18000, label: "5 часов" },
+  { value: 86400, label: "24 часа" },
+] as const
 
 const isIPv4 = (value: string) => {
   const parts = value.split(".")
@@ -141,12 +151,25 @@ function ListenerDialog({ initial, others, health, onSave, onClose }: { initial:
         <Field label="Название" error={errors.name}><Input value={listener.name} aria-invalid={Boolean(errors.name)} onChange={(e) => patch({ name: e.target.value })} /></Field>
         <Field label="Listen address" error={errors.listen_address}><Input className="input mono" value={listener.listen_address} aria-invalid={Boolean(errors.listen_address)} onChange={(e) => patch({ listen_address: e.target.value })} /></Field>
         <Field label="Входной порт" error={errors.listen_port}><Input type="number" min={1} max={65535} value={listener.listen_port} aria-invalid={Boolean(errors.listen_port)} onChange={(e) => patch({ listen_port: Number(e.target.value) })} /></Field>
-        <Field label="Affinity" hint="0 — выключена" error={errors.affinity_seconds}><Input type="number" min={0} max={86400} value={listener.affinity_seconds} aria-invalid={Boolean(errors.affinity_seconds)} onChange={(e) => patch({ affinity_seconds: Number(e.target.value) })} /></Field>
       </div>
       <div className="listener-options">
         <Field label="Протоколы" error={errors.protocols}><div className="protocol-toggle" role="group" aria-label="Протоколы">{(["tcp", "udp"] as Protocol[]).map((protocol) => <button type="button" key={protocol} aria-pressed={listener.protocols.includes(protocol)} onClick={() => toggleProtocol(protocol)}>{protocol.toUpperCase()}</button>)}</div></Field>
         <Field label="Планировщик" hint="WRR учитывает вес, RR распределяет поровну"><select value={listener.scheduler} onChange={(e) => patch({ scheduler: e.target.value as Listener["scheduler"] })}><option value="wrr">Weighted round-robin</option><option value="rr">Round-robin</option></select></Field>
       </div>
+
+      <section className="affinity-card" aria-labelledby="affinity-title">
+        <div className="affinity-card__heading">
+          <div className="affinity-card__icon"><Info /></div>
+          <div><h3 id="affinity-title">Affinity — закрепление клиента</h3><p>IPVS запоминает backend по IP клиента. Это важно для VPN и других stateful UDP-сервисов: после паузы трафик вернётся на тот же сервер.</p></div>
+        </div>
+        <div className="affinity-presets" role="group" aria-label="Время закрепления backend">
+          {affinityPresets.map((preset) => <button type="button" key={preset.value} className={listener.affinity_seconds === preset.value ? "active" : ""} aria-pressed={listener.affinity_seconds === preset.value} onClick={() => patch({ affinity_seconds: preset.value })}>{preset.label}</button>)}
+          <button type="button" className={affinityPresets.every((preset) => preset.value !== listener.affinity_seconds) ? "active" : ""} aria-pressed={affinityPresets.every((preset) => preset.value !== listener.affinity_seconds)} onClick={() => { if (affinityPresets.some((preset) => preset.value === listener.affinity_seconds)) patch({ affinity_seconds: 300 }) }}>Своё значение</button>
+        </div>
+        {affinityPresets.every((preset) => preset.value !== listener.affinity_seconds) && <Field label="Своё значение, секунд" hint="От 1 секунды до 24 часов" error={errors.affinity_seconds}><Input type="number" min={1} max={86400} value={listener.affinity_seconds} aria-invalid={Boolean(errors.affinity_seconds)} onChange={(e) => patch({ affinity_seconds: Number(e.target.value) })} /></Field>}
+        <div className="affinity-note"><strong>Как выбрать:</strong><span><b>0</b> — каждый новый поток может попасть на другой backend. <b>15–30 минут</b> — обычные UDP-сессии. <b>1–5 часов</b> — VPN и долгоживущие сессии. <b>24 часа</b> — только когда backend должен оставаться строго постоянным.</span></div>
+        <p className="affinity-warning">Если health-check выключит недоступный backend, EzhikLB удалит его старую привязку и направит следующий поток на доступный сервер.</p>
+      </section>
 
       <div className="backend-heading"><div><p className="eyebrow">Выходы</p><h3>{listener.backends.length} backend</h3></div><Button variant="secondary" onClick={() => patch({ backends: [...listener.backends, newBackend()] })}><Plus data-icon="inline-start" />Добавить выход</Button></div>
       {errors.backends && <div className="validation-error" role="alert">{errors.backends}</div>}

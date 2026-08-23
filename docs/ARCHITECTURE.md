@@ -50,7 +50,11 @@ The agent also configures `expire_nodest_conn` and
 ## Security boundary
 
 The panel runs unprivileged. Only the agent runs as root. The panel never sends
-shell commands; it exposes validated structured desired state. The alpha local
-agent authenticates with a random bearer token. Remote nodes will later use
-per-node mTLS certificates over an agent-initiated connection.
+shell commands; it exposes validated structured desired state. The local agent
+may use the installation-wide bootstrap token; each remote node receives its
+own random credential and only its SHA-256 hash is stored by the panel. A new
+credential is displayed once and rotation invalidates the previous value.
 
+Remote traffic must use HTTPS. Plain HTTP is accepted only for loopback or when
+`EZHIKLB_ALLOW_INSECURE=1` is explicitly enabled in an isolated test setup.
+mTLS remains a future hardening layer and is not required for alpha.6 operation.

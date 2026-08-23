@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.6
+
+- Fixed the rule-editor field grid and increased small text throughout the panel.
+- Replaced the raw affinity number with documented presets: off, 15/30 minutes, 1/3/5/24 hours, and a custom seconds value.
+- Added guidance for stateful UDP/VPN traffic and backend failover behavior.
+- Added profile cloning, guarded deletion, revision history and rollback-as-a-new-revision.
+- Added remote-node creation with a unique credential shown once, generated install command, credential rotation, rename and removal.
+- Added remote-node disable/re-enable and on-demand ICMP probes executed by each node agent.
+- Kept reusable profile assignment for both local and remote nodes and expanded node version/last-seen/apply status.
+- Remote agents now reject public plain HTTP unless the test-only `EZHIKLB_ALLOW_INSECURE=1` switch is explicit.
+- Added an alpha.6 multi-node, TCP/UDP, weighted distribution and health-failover test plan.
+
 ## 0.1.0-alpha.5
 
 - Replaced expanded listener cards with compact Cloudflare-style rule rows.

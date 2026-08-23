@@ -100,6 +100,7 @@ type NodeDesiredState struct {
 	Revision        int64         `json:"revision"`
 	ProfileID       string        `json:"profile_id"`
 	ProfileName     string        `json:"profile_name"`
+	HealthProbe     int64         `json:"health_probe"`
 	Config          ProfileConfig `json:"config"`
 }
 

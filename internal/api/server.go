@@ -53,7 +53,17 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/profiles", s.admin(http.HandlerFunc(s.createProfile)))
 	mux.Handle("GET /api/v1/profiles/{id}", s.admin(http.HandlerFunc(s.getProfile)))
 	mux.Handle("PUT /api/v1/profiles/{id}", s.admin(http.HandlerFunc(s.publishProfile)))
+	mux.Handle("DELETE /api/v1/profiles/{id}", s.admin(http.HandlerFunc(s.deleteProfile)))
+	mux.Handle("POST /api/v1/profiles/{id}/clone", s.admin(http.HandlerFunc(s.cloneProfile)))
+	mux.Handle("GET /api/v1/profiles/{id}/revisions", s.admin(http.HandlerFunc(s.listRevisions)))
+	mux.Handle("POST /api/v1/profiles/{id}/rollback/{number}", s.admin(http.HandlerFunc(s.rollbackProfile)))
 	mux.Handle("GET /api/v1/nodes", s.admin(http.HandlerFunc(s.listNodes)))
+	mux.Handle("POST /api/v1/nodes", s.admin(http.HandlerFunc(s.createNode)))
+	mux.Handle("PUT /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.updateNode)))
+	mux.Handle("DELETE /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.deleteNode)))
+	mux.Handle("POST /api/v1/nodes/{id}/rotate-token", s.admin(http.HandlerFunc(s.rotateNodeToken)))
+	mux.Handle("POST /api/v1/nodes/{id}/revoke", s.admin(http.HandlerFunc(s.revokeNode)))
+	mux.Handle("POST /api/v1/nodes/{id}/health-probe", s.admin(http.HandlerFunc(s.requestHealthProbe)))
 	mux.Handle("GET /api/v1/health", s.admin(http.HandlerFunc(s.listHealth)))
 	mux.Handle("GET /api/v1/stats", s.admin(http.HandlerFunc(s.listStats)))
 	mux.Handle("PUT /api/v1/nodes/{id}/profile", s.admin(http.HandlerFunc(s.assignProfile)))
@@ -185,6 +195,38 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"profile": profile, "revision": revision})
 }
 
+func (s *Server) listRevisions(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListRevisions(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
+	if err != nil { s.internalError(w, err); return }
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) rollbackProfile(w http.ResponseWriter, r *http.Request) {
+	var number int64
+	if _, err := fmt.Sscan(r.PathValue("number"), &number); err != nil || number < 1 { writeError(w, http.StatusBadRequest, "invalid_request", "Invalid revision number"); return }
+	profile, revision, err := s.store.RollbackProfile(r.Context(), r.PathValue("id"), number)
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile or revision not found"); return }
+	if err != nil { s.internalError(w, err); return }
+	writeJSON(w, http.StatusOK, map[string]any{"profile": profile, "revision": revision})
+}
+
+func (s *Server) cloneProfile(w http.ResponseWriter, r *http.Request) {
+	var body struct{ Name string `json:"name"` }
+	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
+	profile, revision, err := s.store.CloneProfile(r.Context(), r.PathValue("id"), strings.TrimSpace(body.Name))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
+	if err != nil { writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error()); return }
+	writeJSON(w, http.StatusCreated, map[string]any{"profile": profile, "revision": revision})
+}
+
+func (s *Server) deleteProfile(w http.ResponseWriter, r *http.Request) {
+	err := s.store.DeleteProfile(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
+	if err != nil { writeError(w, http.StatusConflict, "profile_in_use", err.Error()); return }
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := s.store.ListNodes(r.Context())
 	if err != nil {
@@ -192,6 +234,55 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, nodes)
+}
+
+func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
+	var body struct { Name string `json:"name"`; IngressAddress string `json:"ingress_address"`; ProfileID string `json:"profile_id"` }
+	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
+	body.Name = strings.TrimSpace(body.Name); body.IngressAddress = strings.TrimSpace(body.IngressAddress)
+	if body.Name == "" || body.ProfileID == "" { writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name and profile are required"); return }
+	node, token, err := s.store.CreateNode(r.Context(), body.Name, body.IngressAddress, body.ProfileID)
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
+	if err != nil { writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error()); return }
+	writeJSON(w, http.StatusCreated, map[string]any{"node": node, "agent_token": token})
+}
+
+func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
+	var body struct { Name string `json:"name"`; IngressAddress string `json:"ingress_address"` }
+	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
+	if strings.TrimSpace(body.Name) == "" { writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name is required"); return }
+	err := s.store.UpdateNode(r.Context(), r.PathValue("id"), strings.TrimSpace(body.Name), strings.TrimSpace(body.IngressAddress))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
+	if err != nil { writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error()); return }
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
+	err := s.store.DeleteNode(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
+	if err != nil { writeError(w, http.StatusConflict, "cannot_delete", err.Error()); return }
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) rotateNodeToken(w http.ResponseWriter, r *http.Request) {
+	token, err := s.store.RotateNodeCredential(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Remote node credential not found"); return }
+	if err != nil { s.internalError(w, err); return }
+	writeJSON(w, http.StatusOK, map[string]string{"agent_token": token})
+}
+
+func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
+	err := s.store.RevokeNodeCredential(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Remote node credential not found"); return }
+	if err != nil { writeError(w, http.StatusConflict, "cannot_revoke", err.Error()); return }
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) requestHealthProbe(w http.ResponseWriter, r *http.Request) {
+	nonce, err := s.store.RequestHealthProbe(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
+	if err != nil { s.internalError(w, err); return }
+	writeJSON(w, http.StatusAccepted, map[string]int64{"health_probe": nonce})
 }
 
 func (s *Server) listHealth(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +328,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	etag := fmt.Sprintf(`"rev-%d"`, state.Revision)
+	etag := fmt.Sprintf(`"rev-%d-probe-%d"`, state.Revision, state.HealthProbe)
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -281,7 +372,8 @@ func (s *Server) admin(next http.Handler) http.Handler {
 func (s *Server) agent(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		value := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !sameSecret(value, s.agentToken) {
+		nodeID := r.PathValue("id")
+		if !(nodeID == "local" && sameSecret(value, s.agentToken)) && !s.store.ValidateNodeCredential(r.Context(), nodeID, value) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid agent credentials")
 			return
 		}
@@ -377,6 +469,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-alpha.5"
+const Version = "0.1.0-alpha.6"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

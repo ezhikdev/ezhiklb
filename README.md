@@ -3,8 +3,8 @@
 EzhikLB is a lightweight Linux control plane and node agent for kernel-level
 TCP and UDP load balancing with IPVS.
 
-The first alpha focuses on a single-host `Panel + Node` deployment while using
-the same profile/revision model that remote nodes will use later.
+Alpha.6 supports both a single-host `Panel + Node` deployment and remote nodes
+that receive reusable profile revisions from one panel.
 
 ## Alpha capabilities
 
@@ -12,7 +12,7 @@ the same profile/revision model that remote nodes will use later.
 - Immutable desired revisions and reported actual revisions.
 - TCP, UDP, or dual-protocol listeners.
 - Multiple backends with weighted round-robin.
-- Optional source affinity; disabled by default.
+- Optional source affinity with documented 15-minute through 24-hour presets and a custom seconds value.
 - Global ICMP reachability checks with failure and recovery thresholds.
 - Incremental IPVS updates without clearing unrelated services.
 - React administration panel and JSON HTTP API.
@@ -21,6 +21,8 @@ the same profile/revision model that remote nodes will use later.
 - Live per-service and per-backend IPVS packet, byte and connection counters.
 - Visible desired/applied state and backend ICMP status.
 - Installer roles: Panel, Node, Panel + Node, and Upgrade.
+- Per-node remote credentials, generated installation command and credential rotation.
+- Profile cloning, guarded deletion, immutable revision history and rollback.
 
 ## Repository layout
 

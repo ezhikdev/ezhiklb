@@ -59,7 +59,7 @@ export interface NodeInfo {
   desired_revision: number
   applied_revision: number
   agent_version: string
-  status: "online" | "offline" | "error"
+  status: "online" | "offline" | "error" | "disabled"
   last_seen_at?: string
   last_error?: string
 }
