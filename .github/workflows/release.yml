@@ -1,0 +1,50 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install web dependencies
+        working-directory: web
+        run: npm install
+      - name: Test backend and agent
+        run: go test ./...
+      - name: Build release bundle
+        run: |
+          npm --prefix web run build
+          mkdir -p dist/bin dist/web
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/bin/ezhiklb ./cmd/ezhiklb
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/bin/ezhiklb-agent ./cmd/ezhiklb-agent
+          cp -a web/dist/. dist/web/
+          cp scripts/install.sh dist/install.sh
+          chmod +x dist/install.sh
+          version="${GITHUB_REF_NAME#v}"
+          cd dist
+          tar -czf "ezhiklb_${version}_linux_amd64.tar.gz" bin web install.sh
+          sha256sum "ezhiklb_${version}_linux_amd64.tar.gz" > "ezhiklb_${version}_linux_amd64.tar.gz.sha256"
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ezhiklb-linux-amd64
+          path: dist/ezhiklb_*.tar.gz*
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ezhiklb_*.tar.gz*
