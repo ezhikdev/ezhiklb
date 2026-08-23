@@ -16,6 +16,10 @@ the same profile/revision model that remote nodes will use later.
 - Global ICMP reachability checks with failure and recovery thresholds.
 - Incremental IPVS updates without clearing unrelated services.
 - React administration panel and JSON HTTP API.
+- Compact Cloudflare-style rule list with focused per-rule editing.
+- Inline conflict validation, cloning, weight percentages and unsaved-change protection.
+- Live per-service and per-backend IPVS packet, byte and connection counters.
+- Visible desired/applied state and backend ICMP status.
 - Installer roles: Panel, Node, Panel + Node, and Upgrade.
 
 ## Repository layout
@@ -36,4 +40,3 @@ docs                 Architecture and test-node instructions
 
 This repository is an alpha. Do not deploy it on a production gateway before
 running the test-node checklist in `docs/TESTING.md`.
-

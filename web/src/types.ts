@@ -81,3 +81,18 @@ export interface BackendHealth {
   latency_millis: number
   checked_at: string
 }
+
+export interface ServiceStat {
+  node_id: string
+  protocol: Protocol
+  listen_address: string
+  listen_port: number
+  backend_address?: string
+  backend_port?: number
+  connections: number
+  incoming_packets: number
+  outgoing_packets: number
+  incoming_bytes: number
+  outgoing_bytes: number
+  collected_at: string
+}

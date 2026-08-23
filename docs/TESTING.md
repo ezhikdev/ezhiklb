@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v0.1.0-alpha.4` and download the generated
-   `ezhiklb_0.1.0-alpha.4_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v0.1.0-alpha.5` and download the generated
+   `ezhiklb_0.1.0-alpha.5_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -22,6 +22,7 @@ sudo systemctl status ezhiklb ezhiklb-agent --no-pager
 sudo journalctl -u ezhiklb -u ezhiklb-agent -n 100 --no-pager
 sudo cat /var/lib/ezhiklb-agent/state.json
 sudo ipvsadm -Ln
+sudo ipvsadm -Ln --stats --exact
 sudo iptables -S EZHIKLB-FORWARD
 sudo iptables -t nat -S EZHIKLB-SNAT
 ```
@@ -55,6 +56,9 @@ sudo sysctl \
 
 Remove or mask client IP addresses before sharing logs. Keep timestamps, ports,
 packet directions, IPVS states and backend addresses intact.
+
+The Overview page should show the same service/backend counters within one
+15-second heartbeat interval.
 
 ## Rollback
 

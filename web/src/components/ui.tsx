@@ -1,6 +1,6 @@
 import { X } from "lucide-react"
 import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react"
-import { useEffect, useRef } from "react"
+import { useEffect, useId, useRef } from "react"
 
 export function Button({ className = "", variant = "primary", type = "button", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" | "danger" }) {
   return <button type={type} className={`button button--${variant} ${className}`} {...props} />
@@ -32,11 +32,16 @@ export function Switch({ checked, onChange, label }: { checked: boolean; onChang
 
 export function Dialog({ title, description, children, onClose, wide = false }: { title: string; description?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const titleID = useId()
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null
     ref.current?.focus()
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose()
+      const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')]
+      if (dialogs.at(-1) !== ref.current) return
+      if (event.key === "Escape") onCloseRef.current()
       if (event.key === "Tab" && ref.current) {
         const items = [...ref.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')]
         if (!items.length) return
@@ -47,11 +52,11 @@ export function Dialog({ title, description, children, onClose, wide = false }: 
     }
     window.addEventListener("keydown", key)
     return () => { window.removeEventListener("keydown", key); previous?.focus() }
-  }, [onClose])
+  }, [])
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-    <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="dialog-title" className={`dialog ${wide ? "dialog--wide" : ""}`}>
+    <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby={titleID} className={`dialog ${wide ? "dialog--wide" : ""}`}>
       <div className="dialog__header">
-        <div><h2 id="dialog-title">{title}</h2>{description && <p>{description}</p>}</div>
+        <div><h2 id={titleID}>{title}</h2>{description && <p>{description}</p>}</div>
         <Button variant="ghost" className="icon-button" onClick={onClose} aria-label="Закрыть"><X /></Button>
       </div>
       {children}

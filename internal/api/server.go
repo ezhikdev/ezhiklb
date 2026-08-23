@@ -55,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/profiles/{id}", s.admin(http.HandlerFunc(s.publishProfile)))
 	mux.Handle("GET /api/v1/nodes", s.admin(http.HandlerFunc(s.listNodes)))
 	mux.Handle("GET /api/v1/health", s.admin(http.HandlerFunc(s.listHealth)))
+	mux.Handle("GET /api/v1/stats", s.admin(http.HandlerFunc(s.listStats)))
 	mux.Handle("PUT /api/v1/nodes/{id}/profile", s.admin(http.HandlerFunc(s.assignProfile)))
 	mux.Handle("GET /agent/v1/nodes/{id}/desired", s.agent(http.HandlerFunc(s.desiredState)))
 	mux.Handle("POST /agent/v1/nodes/{id}/heartbeat", s.agent(http.HandlerFunc(s.heartbeat)))
@@ -202,6 +203,15 @@ func (s *Server) listHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+func (s *Server) listStats(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListStats(r.Context())
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
 func (s *Server) assignProfile(w http.ResponseWriter, r *http.Request) {
 	var body struct{ ProfileID string `json:"profile_id"` }
 	if err := decodeJSON(r, &body); err != nil {
@@ -227,6 +237,12 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	etag := fmt.Sprintf(`"rev-%d"`, state.Revision)
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	writeJSON(w, http.StatusOK, state)
 }
 
@@ -236,12 +252,13 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		AppliedRevision int64  `json:"applied_revision"`
 		ApplyError      string `json:"apply_error"`
 		Health          []domain.BackendHealth `json:"health"`
+		Stats           []domain.ServiceStat `json:"stats"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, body.AppliedRevision, body.ApplyError, body.Health); errors.Is(err, store.ErrNotFound) {
+	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, body.AppliedRevision, body.ApplyError, body.Health, body.Stats); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
 		s.internalError(w, err)
@@ -284,6 +301,12 @@ func (s *Server) static() http.Handler {
 		}
 		if _, err := os.Stat(filepath.Join(s.webDir, clean)); err != nil {
 			r.URL.Path = "/"
+			clean = "index.html"
+		}
+		if clean == "index.html" {
+			w.Header().Set("Cache-Control", "no-cache")
+		} else if strings.HasPrefix(clean, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 		files.ServeHTTP(w, r)
 	})
@@ -354,6 +377,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-alpha.4"
+const Version = "0.1.0-alpha.5"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

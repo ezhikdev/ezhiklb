@@ -35,6 +35,16 @@ func TestDuplicateProtocolServiceIsRejected(t *testing.T) {
 	}
 }
 
+func TestWildcardAndSpecificAddressConflictIsRejected(t *testing.T) {
+	config := DefaultProfileConfig()
+	first := Listener{ID: "a", Name: "Wildcard", Enabled: true, ListenAddress: "0.0.0.0", ListenPort: 8002, Protocols: []Protocol{ProtocolUDP}, Scheduler: "wrr", Backends: []Backend{{ID: "a", Address: "192.0.2.1", Port: 8002, Weight: 1, Enabled: true}}}
+	second := Listener{ID: "b", Name: "Specific", Enabled: true, ListenAddress: "192.0.2.20", ListenPort: 8002, Protocols: []Protocol{ProtocolUDP}, Scheduler: "wrr", Backends: []Backend{{ID: "b", Address: "192.0.2.2", Port: 8002, Weight: 1, Enabled: true}}}
+	config.Listeners = []Listener{first, second}
+	if err := config.Validate(); err == nil {
+		t.Fatal("expected wildcard address conflict")
+	}
+}
+
 func TestParseLegacyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legacy.conf")
@@ -57,4 +67,3 @@ func TestParseLegacyFile(t *testing.T) {
 		t.Fatalf("unexpected migrated backend: %#v", listener.Backends[0])
 	}
 }
-

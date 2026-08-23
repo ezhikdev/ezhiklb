@@ -1,4 +1,4 @@
-import type { BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, Status } from "../types"
+import type { BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, ServiceStat, Status } from "../types"
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -32,5 +32,6 @@ export const api = {
     request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`, { method: "PUT", body: JSON.stringify({ name, description, config }) }),
   nodes: () => request<NodeInfo[]>("/api/v1/nodes"),
   health: () => request<BackendHealth[]>("/api/v1/health"),
+  stats: () => request<ServiceStat[]>("/api/v1/stats"),
   assignProfile: (nodeID: string, profileID: string) => request<void>(`/api/v1/nodes/${nodeID}/profile`, { method: "PUT", body: JSON.stringify({ profile_id: profileID }) }),
 }

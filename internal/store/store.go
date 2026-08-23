@@ -91,6 +91,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			checked_at TEXT NOT NULL,
 			PRIMARY KEY(node_id, address)
 		)`,
+		`CREATE TABLE IF NOT EXISTS service_stats (
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			protocol TEXT NOT NULL,
+			listen_address TEXT NOT NULL,
+			listen_port INTEGER NOT NULL,
+			backend_address TEXT NOT NULL DEFAULT '',
+			backend_port INTEGER NOT NULL DEFAULT 0,
+			connections INTEGER NOT NULL DEFAULT 0,
+			incoming_packets INTEGER NOT NULL DEFAULT 0,
+			outgoing_packets INTEGER NOT NULL DEFAULT 0,
+			incoming_bytes INTEGER NOT NULL DEFAULT 0,
+			outgoing_bytes INTEGER NOT NULL DEFAULT 0,
+			collected_at TEXT NOT NULL,
+			PRIMARY KEY(node_id, protocol, listen_address, listen_port, backend_address, backend_port)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -276,7 +291,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		if node.LastSeenAt == nil || time.Since(*node.LastSeenAt) > 20*time.Second {
+		if node.LastSeenAt == nil || time.Since(*node.LastSeenAt) > 45*time.Second {
 			node.Status = "offline"
 		}
 		nodes = append(nodes, node)
@@ -324,7 +339,7 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 	return result, nil
 }
 
-func (s *Store) Heartbeat(ctx context.Context, nodeID, version string, applied int64, applyError string, health []domain.BackendHealth) error {
+func (s *Store) Heartbeat(ctx context.Context, nodeID, version string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat) error {
 	status := "online"
 	if applyError != "" {
 		status = "error"
@@ -354,6 +369,17 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version string, applied i
 			return err
 		}
 	}
+	if stats != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM service_stats WHERE node_id=?`, nodeID); err != nil {
+			return err
+		}
+		for _, item := range stats {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO service_stats(node_id,protocol,listen_address,listen_port,backend_address,backend_port,connections,incoming_packets,outgoing_packets,incoming_bytes,outgoing_bytes,collected_at)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, nodeID, item.Protocol, item.ListenAddress, item.ListenPort, item.BackendAddress, item.BackendPort, item.Connections, item.IncomingPackets, item.OutgoingPackets, item.IncomingBytes, item.OutgoingBytes, formatTime(item.CollectedAt)); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit()
 }
 
@@ -363,7 +389,7 @@ func (s *Store) ListHealth(ctx context.Context) ([]domain.BackendHealth, error) 
 		return nil, err
 	}
 	defer rows.Close()
-	var result []domain.BackendHealth
+	result := make([]domain.BackendHealth, 0)
 	for rows.Next() {
 		var item domain.BackendHealth
 		var checked string
@@ -371,6 +397,28 @@ func (s *Store) ListHealth(ctx context.Context) ([]domain.BackendHealth, error) 
 			return nil, err
 		}
 		item.CheckedAt, err = parseTime(checked)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListStats(ctx context.Context) ([]domain.ServiceStat, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id,protocol,listen_address,listen_port,backend_address,backend_port,connections,incoming_packets,outgoing_packets,incoming_bytes,outgoing_bytes,collected_at FROM service_stats ORDER BY node_id,protocol,listen_address,listen_port,backend_address,backend_port`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.ServiceStat, 0)
+	for rows.Next() {
+		var item domain.ServiceStat
+		var collected string
+		if err := rows.Scan(&item.NodeID, &item.Protocol, &item.ListenAddress, &item.ListenPort, &item.BackendAddress, &item.BackendPort, &item.Connections, &item.IncomingPackets, &item.OutgoingPackets, &item.IncomingBytes, &item.OutgoingBytes, &collected); err != nil {
+			return nil, err
+		}
+		item.CollectedAt, err = parseTime(collected)
 		if err != nil {
 			return nil, err
 		}

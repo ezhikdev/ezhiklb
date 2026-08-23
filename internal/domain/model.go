@@ -113,6 +113,21 @@ type BackendHealth struct {
 	CheckedAt        time.Time `json:"checked_at"`
 }
 
+type ServiceStat struct {
+	NodeID         string    `json:"node_id,omitempty"`
+	Protocol       Protocol  `json:"protocol"`
+	ListenAddress  string    `json:"listen_address"`
+	ListenPort     uint16    `json:"listen_port"`
+	BackendAddress string    `json:"backend_address,omitempty"`
+	BackendPort    uint16    `json:"backend_port,omitempty"`
+	Connections    uint64    `json:"connections"`
+	IncomingPackets uint64   `json:"incoming_packets"`
+	OutgoingPackets uint64   `json:"outgoing_packets"`
+	IncomingBytes  uint64    `json:"incoming_bytes"`
+	OutgoingBytes  uint64    `json:"outgoing_bytes"`
+	CollectedAt    time.Time `json:"collected_at"`
+}
+
 func (c ProfileConfig) Validate() error {
 	var problems []string
 	if c.SchemaVersion != SchemaVersion {
@@ -176,6 +191,19 @@ func (c ProfileConfig) Validate() error {
 			if owner, exists := serviceKeys[key]; exists {
 				problems = append(problems, fmt.Sprintf("%s conflicts with listener %s", prefix, owner))
 			}
+			wildcardKey := fmt.Sprintf("0.0.0.0:%d/%s", listener.ListenPort, protocol)
+			if listener.ListenAddress != "0.0.0.0" {
+				if owner, exists := serviceKeys[wildcardKey]; exists {
+					problems = append(problems, fmt.Sprintf("%s conflicts with wildcard listener %s", prefix, owner))
+				}
+			} else {
+				suffix := fmt.Sprintf(":%d/%s", listener.ListenPort, protocol)
+				for existingKey, owner := range serviceKeys {
+					if existingKey != key && strings.HasSuffix(existingKey, suffix) {
+						problems = append(problems, fmt.Sprintf("%s conflicts with listener %s", prefix, owner))
+					}
+				}
+			}
 			serviceKeys[key] = listener.ID
 		}
 		if len(protocols) == 0 {
@@ -183,6 +211,7 @@ func (c ProfileConfig) Validate() error {
 		}
 
 		backendIDs := map[string]bool{}
+		backendEndpoints := map[string]bool{}
 		enabledBackends := 0
 		for j, backend := range listener.Backends {
 			backendPrefix := fmt.Sprintf("%s.backends[%d]", prefix, j)
@@ -202,6 +231,11 @@ func (c ProfileConfig) Validate() error {
 			if backend.Weight < 1 || backend.Weight > 65535 {
 				problems = append(problems, backendPrefix+".weight must be between 1 and 65535")
 			}
+			endpoint := fmt.Sprintf("%s:%d", backend.Address, backend.Port)
+			if backendEndpoints[endpoint] {
+				problems = append(problems, backendPrefix+" duplicates another backend endpoint")
+			}
+			backendEndpoints[endpoint] = true
 			if backend.Enabled {
 				enabledBackends++
 			}

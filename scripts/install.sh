@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-alpha.4"
+EZHIKLB_VERSION="0.1.0-alpha.5"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -28,6 +28,7 @@ restore_previous_release() {
   [[ -d "${backup_dir}/bin" ]] && cp -a "${backup_dir}/bin/." "${PREFIX}/bin/"
   [[ -d "${backup_dir}/web" ]] && cp -a "${backup_dir}/web/." "$WEB_DIR/"
   [[ -d "${backup_dir}/etc" ]] && cp -a "${backup_dir}/etc/." "$CONFIG_DIR/"
+  [[ -d "${backup_dir}/data" ]] && cp -a "${backup_dir}/data/." "$DATA_DIR/"
   systemctl daemon-reload
   [[ -f /etc/systemd/system/ezhiklb.service ]] && systemctl start ezhiklb.service || true
   [[ -f /etc/systemd/system/ezhiklb-agent.service ]] && systemctl start ezhiklb-agent.service || true
@@ -94,6 +95,7 @@ if [[ -n "$EXISTING_VERSION" ]]; then
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   backup_dir="${BACKUP_ROOT}/${stamp}"
   log "Backing up the existing installation to ${backup_dir}"
+  systemctl stop ezhiklb-agent.service ezhiklb.service 2>/dev/null || true
   install -d -m 0700 "$backup_dir"
   [[ -d "$CONFIG_DIR" ]] && cp -a "$CONFIG_DIR" "${backup_dir}/etc"
   [[ -d "$DATA_DIR" ]] && cp -a "$DATA_DIR" "${backup_dir}/data"

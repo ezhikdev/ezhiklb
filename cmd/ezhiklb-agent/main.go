@@ -20,7 +20,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-alpha.4"
+const version = "0.1.0-alpha.5"
 
 type client struct {
 	baseURL string
@@ -44,26 +44,39 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	poll := time.NewTicker(5 * time.Second)
-	defer poll.Stop()
+	desiredPoll := time.NewTicker(5 * time.Second)
+	heartbeatPoll := time.NewTicker(15 * time.Second)
+	defer desiredPoll.Stop()
+	defer heartbeatPoll.Stop()
 	var applied int64
 	var applyError string
 	var healthCancel context.CancelFunc
 	var healthMu sync.Mutex
 
-	reconcile := func() {
-		desired, err := api.desired(ctx, nodeID)
+	report := func() {
+		stats, err := agent.CollectIPVSStats(ctx, runner)
 		if err != nil {
-			applyError = err.Error()
+			logger.Warn("collect IPVS stats", "error", err)
+		}
+		if err := api.heartbeat(ctx, nodeID, applied, applyError, monitor.Results(), stats); err != nil {
+			logger.Error("send heartbeat", "error", err)
+		}
+	}
+	reconcile := func() bool {
+		desired, changed, err := api.desired(ctx, nodeID, applied)
+		if err != nil {
 			logger.Error("fetch desired state", "error", err)
-			_ = api.heartbeat(ctx, nodeID, applied, applyError, monitor.Results())
-			return
+			return false
+		}
+		if !changed {
+			return false
 		}
 		if desired.Revision != applied {
 			logger.Info("applying desired revision", "revision", desired.Revision, "profile", desired.ProfileName)
 			if err := reconciler.Reconcile(ctx, desired); err != nil {
 				applyError = err.Error()
 				logger.Error("apply desired state", "revision", desired.Revision, "error", err)
+				return true
 			} else {
 				applied = desired.Revision
 				applyError = ""
@@ -76,14 +89,14 @@ func main() {
 				healthMu.Unlock()
 				monitor.Reset()
 				go monitor.Run(healthCtx, desired.Config.HealthCheck, reconciler.Services)
+				return true
 			}
 		}
-		if err := api.heartbeat(ctx, nodeID, applied, applyError, monitor.Results()); err != nil {
-			logger.Error("send heartbeat", "error", err)
-		}
+		return false
 	}
 
 	reconcile()
+	report()
 	for {
 		select {
 		case <-ctx.Done():
@@ -93,36 +106,44 @@ func main() {
 			}
 			healthMu.Unlock()
 			return
-		case <-poll.C:
-			reconcile()
+		case <-desiredPoll.C:
+			if reconcile() {
+				report()
+			}
+		case <-heartbeatPoll.C:
+			report()
 		}
 	}
 }
 
-func (c *client) desired(ctx context.Context, nodeID string) (domain.NodeDesiredState, error) {
+func (c *client) desired(ctx context.Context, nodeID string, knownRevision int64) (domain.NodeDesiredState, bool, error) {
 	var result domain.NodeDesiredState
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/v1/nodes/"+nodeID+"/desired", nil)
 	if err != nil {
-		return result, err
+		return result, false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d"`, knownRevision))
 	response, err := c.http.Do(request)
 	if err != nil {
-		return result, err
+		return result, false, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotModified {
+		return result, false, nil
+	}
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 8192))
-		return result, fmt.Errorf("panel returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+		return result, false, fmt.Errorf("panel returned %s: %s", response.Status, strings.TrimSpace(string(body)))
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&result); err != nil {
-		return result, err
+		return result, false, err
 	}
-	return result, nil
+	return result, true, nil
 }
 
-func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError string, health []domain.BackendHealth) error {
-	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "health": health})
+func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat) error {
+	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "health": health, "stats": stats})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/agent/v1/nodes/"+nodeID+"/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return err
