@@ -1,0 +1,19 @@
+# Build output
+/bin/
+/dist/
+/web/dist/
+/web/node_modules/
+
+# Local runtime state
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env
+ezhiklb-credentials.txt
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
