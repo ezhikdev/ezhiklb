@@ -3,7 +3,15 @@ import { useMemo, useState } from "react"
 import type { Backend, Listener, ProfileConfig, Protocol } from "../types"
 import { Button, Card, Field, Input, Switch } from "./ui"
 
-const makeID = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`
+const makeID = (prefix: string) => {
+  const bytes = new Uint8Array(8)
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256)
+  }
+  return `${prefix}_${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`
+}
 
 const newBackend = (): Backend => ({ id: makeID("bck"), address: "", port: 8080, weight: 1, enabled: true })
 const newListener = (): Listener => ({
@@ -83,4 +91,3 @@ function ListenerEditor({ listener, onChange, onRemove }: { listener: Listener; 
     <Button variant="ghost" onClick={() => onChange({ ...listener, backends: [...listener.backends, newBackend()] })}><Plus data-icon="inline-start" />Добавить выход</Button>
   </Card>
 }
-

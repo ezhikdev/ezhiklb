@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-alpha.3"
+EZHIKLB_VERSION="0.1.0-alpha.4"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -267,7 +267,7 @@ if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
   rm -f -- "$apply_marker"
 fi
 
-log "EzhikLB ${EZHIKLB_VERSION} installed successfully"
+log "${EZHIKLB_VERSION} installed successfully"
 printf 'Role: %s\n' "$ROLE"
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
   printf 'Local panel: http://127.0.0.1:8080\n'
