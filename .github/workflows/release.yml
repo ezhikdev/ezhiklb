@@ -23,6 +23,8 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: npm install
+      - name: Resolve Go dependencies
+        run: go mod tidy
       - name: Test backend and agent
         run: go test ./...
       - name: Build release bundle
