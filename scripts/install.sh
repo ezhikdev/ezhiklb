@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.1.0-alpha.2"
+EZHIKLB_VERSION="0.1.0-alpha.3"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -49,7 +49,7 @@ choose_role() {
   if [[ -n "$EXISTING_VERSION" ]]; then
     printf 'Existing EzhikLB %s detected. Configuration and database will be preserved.\n' "$EXISTING_VERSION"
     if [[ "${EZHIKLB_YES:-0}" != "1" ]]; then
-      read -r -p "Upgrade to ${VERSION}? [Y/n]: " confirm
+      read -r -p "Upgrade to ${EZHIKLB_VERSION}? [Y/n]: " confirm
       case "${confirm:-y}" in y|Y|yes|YES) ;; *) die "upgrade cancelled" ;; esac
     fi
     ROLE="$(sed -n 's/^EZHIKLB_ROLE=//p' "$ENV_FILE" 2>/dev/null | tr -d '"' || true)"
@@ -107,7 +107,10 @@ if ! getent passwd ezhiklb >/dev/null; then
 fi
 install -d -m 0750 -o root -g ezhiklb "$CONFIG_DIR"
 install -d -m 0750 -o ezhiklb -g ezhiklb "$DATA_DIR"
-install -d -m 0750 -o root -g root "$AGENT_DATA_DIR" "$PREFIX/bin"
+install -d -m 0750 -o root -g root "$AGENT_DATA_DIR"
+# The control plane runs as the unprivileged ezhiklb user. Every directory in
+# its executable path must therefore be traversable, while remaining root-owned.
+install -d -m 0755 -o root -g root "$PREFIX" "$PREFIX/bin"
 
 legacy_config="/etc/ezhik-udp/ezhik-udp.conf"
 if [[ -f "$legacy_config" ]]; then
@@ -142,7 +145,7 @@ else
 fi
 
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
-  log "Installing panel ${VERSION}"
+  log "Installing panel ${EZHIKLB_VERSION}"
   install -m 0755 "${BUNDLE_DIR}/bin/ezhiklb" "${PREFIX}/bin/ezhiklb"
   install -d -m 0755 "$WEB_DIR"
   cp -a "${BUNDLE_DIR}/web/." "$WEB_DIR/"
@@ -174,7 +177,7 @@ fi
 
 legacy_was_active=0
 if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
-  log "Installing node agent ${VERSION}"
+  log "Installing node agent ${EZHIKLB_VERSION}"
   install -m 0755 "${BUNDLE_DIR}/bin/ezhiklb-agent" "${PREFIX}/bin/ezhiklb-agent"
   cat >/etc/modules-load.d/ezhiklb.conf <<'EOF'
 ip_vs
@@ -221,7 +224,7 @@ EOF
   fi
 fi
 
-printf '%s\n' "$VERSION" >"$VERSION_FILE"
+printf '%s\n' "$EZHIKLB_VERSION" >"$VERSION_FILE"
 systemctl daemon-reload
 
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
@@ -264,7 +267,7 @@ if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
   rm -f -- "$apply_marker"
 fi
 
-log "EzhikLB ${VERSION} installed successfully"
+log "EzhikLB ${EZHIKLB_VERSION} installed successfully"
 printf 'Role: %s\n' "$ROLE"
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
   printf 'Local panel: http://127.0.0.1:8080\n'
