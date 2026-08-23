@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+VERSION="0.1.0-alpha.1"
+PREFIX="/opt/ezhiklb"
+CONFIG_DIR="/etc/ezhiklb"
+DATA_DIR="/var/lib/ezhiklb"
+AGENT_DATA_DIR="/var/lib/ezhiklb-agent"
+WEB_DIR="/usr/share/ezhiklb/web"
+ENV_FILE="${CONFIG_DIR}/ezhiklb.env"
+VERSION_FILE="${CONFIG_DIR}/version"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "${SCRIPT_DIR}/bin" ]]; then
+  BUNDLE_DIR="$SCRIPT_DIR"
+else
+  BUNDLE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+fi
+BACKUP_ROOT="/var/backups/ezhiklb"
+backup_dir=""
+
+log() { printf '\n\033[1;36mEzhikLB\033[0m %s\n' "$*"; }
+die() { printf '\nEzhikLB installer error: %s\n' "$*" >&2; exit 1; }
+
+restore_previous_release() {
+  [[ -n "$backup_dir" ]] || return 0
+  log "Restoring previous EzhikLB release"
+  systemctl stop ezhiklb-agent.service ezhiklb.service 2>/dev/null || true
+  [[ -d "${backup_dir}/bin" ]] && cp -a "${backup_dir}/bin/." "${PREFIX}/bin/"
+  [[ -d "${backup_dir}/web" ]] && cp -a "${backup_dir}/web/." "$WEB_DIR/"
+  [[ -d "${backup_dir}/etc" ]] && cp -a "${backup_dir}/etc/." "$CONFIG_DIR/"
+  systemctl daemon-reload
+  [[ -f /etc/systemd/system/ezhiklb.service ]] && systemctl start ezhiklb.service || true
+  [[ -f /etc/systemd/system/ezhiklb-agent.service ]] && systemctl start ezhiklb-agent.service || true
+}
+
+[[ "${EUID}" -eq 0 ]] || die "run this installer as root"
+[[ -r /etc/os-release ]] || die "unsupported operating system"
+. /etc/os-release
+case "${ID:-}" in ubuntu|debian) ;; *) die "only Debian and Ubuntu are supported in this alpha" ;; esac
+
+EXISTING_VERSION=""
+[[ -f "$VERSION_FILE" ]] && EXISTING_VERSION="$(<"$VERSION_FILE")"
+
+choose_role() {
+  if [[ -n "${EZHIKLB_ROLE:-}" ]]; then
+    ROLE="$EZHIKLB_ROLE"
+    return
+  fi
+  if [[ -n "$EXISTING_VERSION" ]]; then
+    printf 'Existing EzhikLB %s detected. Configuration and database will be preserved.\n' "$EXISTING_VERSION"
+    if [[ "${EZHIKLB_YES:-0}" != "1" ]]; then
+      read -r -p "Upgrade to ${VERSION}? [Y/n]: " confirm
+      case "${confirm:-y}" in y|Y|yes|YES) ;; *) die "upgrade cancelled" ;; esac
+    fi
+    ROLE="$(sed -n 's/^EZHIKLB_ROLE=//p' "$ENV_FILE" 2>/dev/null | tr -d '"' || true)"
+    ROLE="${ROLE:-panel-node}"
+    return
+  fi
+  printf '\nSelect installation role:\n'
+  printf '  1) Panel\n  2) Node (requires enrollment variables)\n  3) Panel + Node (recommended for alpha)\n'
+  read -r -p 'Role [3]: ' answer
+  case "${answer:-3}" in 1) ROLE="panel" ;; 2) ROLE="node" ;; 3) ROLE="panel-node" ;; *) die "invalid role" ;; esac
+}
+
+choose_role
+case "$ROLE" in panel|node|panel-node) ;; *) die "EZHIKLB_ROLE must be panel, node, or panel-node" ;; esac
+if [[ "$ROLE" == "node" ]]; then
+  [[ -n "${EZHIKLB_PANEL_URL:-}" ]] || die "node-only installation requires EZHIKLB_PANEL_URL"
+  [[ ${#EZHIKLB_AGENT_TOKEN} -ge 24 ]] || die "node-only installation requires EZHIKLB_AGENT_TOKEN from the panel"
+  [[ -n "${EZHIKLB_NODE_ID:-}" ]] || die "node-only installation requires EZHIKLB_NODE_ID"
+fi
+
+require_artifacts() {
+  if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
+    [[ -x "${BUNDLE_DIR}/bin/ezhiklb" ]] || die "missing bin/ezhiklb; use a GitHub release bundle"
+    [[ -f "${BUNDLE_DIR}/web/index.html" ]] || die "missing compiled web/index.html; use a GitHub release bundle"
+  fi
+  if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
+    [[ -x "${BUNDLE_DIR}/bin/ezhiklb-agent" ]] || die "missing bin/ezhiklb-agent; use a GitHub release bundle"
+  fi
+}
+require_artifacts
+
+log "Installing system dependencies"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+packages=(ca-certificates curl openssl)
+if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
+  packages+=(ipvsadm iptables iproute2 iputils-ping conntrack)
+fi
+apt-get install -y "${packages[@]}"
+
+if [[ -n "$EXISTING_VERSION" ]]; then
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_dir="${BACKUP_ROOT}/${stamp}"
+  log "Backing up the existing installation to ${backup_dir}"
+  install -d -m 0700 "$backup_dir"
+  [[ -d "$CONFIG_DIR" ]] && cp -a "$CONFIG_DIR" "${backup_dir}/etc"
+  [[ -d "$DATA_DIR" ]] && cp -a "$DATA_DIR" "${backup_dir}/data"
+  [[ -d "${PREFIX}/bin" ]] && cp -a "${PREFIX}/bin" "${backup_dir}/bin"
+  [[ -d "$WEB_DIR" ]] && cp -a "$WEB_DIR" "${backup_dir}/web"
+fi
+
+log "Preparing users and directories"
+if ! getent passwd ezhiklb >/dev/null; then
+  useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin ezhiklb
+fi
+install -d -m 0750 -o root -g ezhiklb "$CONFIG_DIR"
+install -d -m 0750 -o ezhiklb -g ezhiklb "$DATA_DIR"
+install -d -m 0750 -o root -g root "$AGENT_DATA_DIR" "$PREFIX/bin"
+
+legacy_config="/etc/ezhik-udp/ezhik-udp.conf"
+if [[ -f "$legacy_config" ]]; then
+  install -m 0640 -o root -g ezhiklb "$legacy_config" "${CONFIG_DIR}/legacy-ezhik-udp.conf"
+  legacy_config="${CONFIG_DIR}/legacy-ezhik-udp.conf"
+fi
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  admin_token="${EZHIKLB_ADMIN_TOKEN:-$(openssl rand -hex 32)}"
+  agent_token="${EZHIKLB_AGENT_TOKEN:-$(openssl rand -hex 32)}"
+  ingress="${EZHIKLB_INGRESS_ADDRESS:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')}"
+  panel_url="${EZHIKLB_PANEL_URL:-http://127.0.0.1:8080}"
+  cat >"$ENV_FILE" <<EOF
+EZHIKLB_ROLE=${ROLE}
+EZHIKLB_HOST=127.0.0.1
+EZHIKLB_PORT=8080
+EZHIKLB_SECURE_COOKIE=0
+EZHIKLB_DATABASE=${DATA_DIR}/ezhiklb.db
+EZHIKLB_WEB_DIR=${WEB_DIR}
+EZHIKLB_INGRESS_ADDRESS=${ingress}
+EZHIKLB_ADMIN_TOKEN=${admin_token}
+EZHIKLB_AGENT_TOKEN=${agent_token}
+EZHIKLB_NODE_ID=${EZHIKLB_NODE_ID:-local}
+EZHIKLB_PANEL_URL=${panel_url}
+EZHIKLB_AGENT_STATE=${AGENT_DATA_DIR}/state.json
+EZHIKLB_LEGACY_CONFIG=${legacy_config}
+EOF
+  chmod 0640 "$ENV_FILE"
+  chown root:ezhiklb "$ENV_FILE"
+else
+  sed -i "s/^EZHIKLB_ROLE=.*/EZHIKLB_ROLE=${ROLE}/" "$ENV_FILE"
+fi
+
+if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
+  log "Installing panel ${VERSION}"
+  install -m 0755 "${BUNDLE_DIR}/bin/ezhiklb" "${PREFIX}/bin/ezhiklb"
+  install -d -m 0755 "$WEB_DIR"
+  cp -a "${BUNDLE_DIR}/web/." "$WEB_DIR/"
+  chown -R root:root "$WEB_DIR"
+  cat >/etc/systemd/system/ezhiklb.service <<EOF
+[Unit]
+Description=EzhikLB control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ezhiklb
+Group=ezhiklb
+EnvironmentFile=${ENV_FILE}
+ExecStart=${PREFIX}/bin/ezhiklb
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=${DATA_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
+legacy_was_active=0
+if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
+  log "Installing node agent ${VERSION}"
+  install -m 0755 "${BUNDLE_DIR}/bin/ezhiklb-agent" "${PREFIX}/bin/ezhiklb-agent"
+  cat >/etc/modules-load.d/ezhiklb.conf <<'EOF'
+ip_vs
+ip_vs_rr
+ip_vs_wrr
+nf_conntrack
+xt_ipvs
+EOF
+  cat >/etc/sysctl.d/98-ezhiklb.conf <<'EOF'
+net.ipv4.ip_forward = 1
+net.ipv4.vs.conntrack = 1
+net.ipv4.vs.snat_reroute = 1
+net.ipv4.vs.expire_nodest_conn = 1
+net.ipv4.vs.expire_quiescent_template = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+EOF
+  modprobe ip_vs ip_vs_rr ip_vs_wrr nf_conntrack xt_ipvs
+  sysctl --load /etc/sysctl.d/98-ezhiklb.conf >/dev/null
+  cat >/etc/systemd/system/ezhiklb-agent.service <<EOF
+[Unit]
+Description=EzhikLB node agent
+After=network-online.target ezhiklb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${ENV_FILE}
+ExecStart=${PREFIX}/bin/ezhiklb-agent
+Restart=always
+RestartSec=3s
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=${AGENT_DATA_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  if systemctl is-active --quiet ezhik-udp.service 2>/dev/null; then
+    legacy_was_active=1
+    log "Stopping legacy Ezhik UDP for an atomic handover; its configuration is preserved"
+    systemctl stop ezhik-udp.service
+  fi
+fi
+
+printf '%s\n' "$VERSION" >"$VERSION_FILE"
+systemctl daemon-reload
+
+if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
+  systemctl enable ezhiklb.service
+  systemctl restart ezhiklb.service
+  for _ in {1..20}; do
+    curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
+    sleep 1
+  done
+  if ! curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then
+    systemctl status ezhiklb.service --no-pager || true
+    restore_previous_release
+    [[ "$legacy_was_active" == "1" ]] && systemctl start ezhik-udp.service || true
+    die "panel health check failed"
+  fi
+fi
+
+if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
+  apply_marker="/run/ezhiklb-agent-install.$$"
+  : >"$apply_marker"
+  systemctl enable ezhiklb-agent.service
+  systemctl restart ezhiklb-agent.service
+  for _ in {1..30}; do
+    [[ -s "${AGENT_DATA_DIR}/state.json" && "${AGENT_DATA_DIR}/state.json" -nt "$apply_marker" ]] && break
+    sleep 1
+  done
+  if ! systemctl is-active --quiet ezhiklb-agent.service; then
+    systemctl status ezhiklb-agent.service --no-pager || true
+    restore_previous_release
+    [[ "$legacy_was_active" == "1" ]] && systemctl start ezhik-udp.service || true
+    die "agent failed to start; legacy service was restored when applicable"
+  fi
+  if [[ ! -s "${AGENT_DATA_DIR}/state.json" || ! "${AGENT_DATA_DIR}/state.json" -nt "$apply_marker" ]]; then
+    journalctl -u ezhiklb-agent.service -n 80 --no-pager || true
+    systemctl stop ezhiklb-agent.service || true
+    restore_previous_release
+    [[ "$legacy_was_active" == "1" ]] && systemctl start ezhik-udp.service || true
+    die "agent did not apply its first revision; legacy service was restored when applicable"
+  fi
+  rm -f -- "$apply_marker"
+fi
+
+log "EzhikLB ${VERSION} installed successfully"
+printf 'Role: %s\n' "$ROLE"
+if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
+  printf 'Local panel: http://127.0.0.1:8080\n'
+  printf 'SSH tunnel: ssh -L 8080:127.0.0.1:8080 root@YOUR_SERVER\n'
+  printf 'Admin token: %s\n' "$(sed -n 's/^EZHIKLB_ADMIN_TOKEN=//p' "$ENV_FILE")"
+fi
+printf 'Configuration: %s\n' "$ENV_FILE"

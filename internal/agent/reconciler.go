@@ -1,0 +1,460 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ezhik-lb/ezhiklb/internal/domain"
+)
+
+type Runner interface {
+	Run(context.Context, string, []string, string) (string, error)
+}
+
+type ExecRunner struct{}
+
+func (ExecRunner) Run(ctx context.Context, name string, args []string, input string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+type Service struct {
+	Protocol      domain.Protocol `json:"protocol"`
+	Address       string          `json:"address"`
+	Port          uint16          `json:"port"`
+	Scheduler     string          `json:"scheduler"`
+	AffinitySecs  int             `json:"affinity_seconds"`
+	Destinations  []Destination   `json:"destinations"`
+}
+
+type Destination struct {
+	ID      string `json:"id"`
+	Address string `json:"address"`
+	Port    uint16 `json:"port"`
+	Weight  int    `json:"weight"`
+}
+
+type AppliedState struct {
+	Revision int64     `json:"revision"`
+	Services []Service `json:"services"`
+}
+
+type Reconciler struct {
+	runner    Runner
+	statePath string
+	logger    *slog.Logger
+	mu        sync.Mutex
+}
+
+func NewReconciler(runner Runner, statePath string, logger *slog.Logger) *Reconciler {
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Reconciler{runner: runner, statePath: statePath, logger: logger}
+}
+
+func (r *Reconciler) Services() []Service {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, err := r.loadState()
+	if err != nil {
+		return nil
+	}
+	return append([]Service(nil), state.Services...)
+}
+
+func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredState) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := desired.Config.Validate(); err != nil {
+		return fmt.Errorf("invalid desired revision: %w", err)
+	}
+	vip, err := r.resolveIngress(ctx, desired.IngressAddress)
+	if err != nil {
+		return err
+	}
+	services := compileServices(desired.Config, vip)
+	if err := r.validateLocalAddresses(ctx, services); err != nil {
+		return err
+	}
+	old, err := r.loadState()
+	if err != nil {
+		return err
+	}
+	if err := r.configureKernel(ctx); err != nil {
+		return err
+	}
+	if err := r.warmRoutes(ctx, services); err != nil {
+		r.logger.Warn("route warm-up was incomplete", "error", err)
+	}
+	transitionServices := unionServices(old.Services, services)
+	if err := r.applyFirewall(ctx, transitionServices); err != nil {
+		return fmt.Errorf("apply firewall: %w", err)
+	}
+	if err := r.applyIPVS(ctx, old.Services, services); err != nil {
+		rollbackErr := r.applyIPVS(ctx, services, old.Services)
+		_ = r.applyFirewall(ctx, old.Services)
+		if rollbackErr != nil {
+			return fmt.Errorf("apply IPVS: %v; rollback also failed: %w", err, rollbackErr)
+		}
+		return fmt.Errorf("apply IPVS: %w (previous state restored)", err)
+	}
+	if err := r.applyFirewall(ctx, services); err != nil {
+		return fmt.Errorf("finalize firewall: %w", err)
+	}
+	return r.saveState(AppliedState{Revision: desired.Revision, Services: services})
+}
+
+func (r *Reconciler) validateLocalAddresses(ctx context.Context, services []Service) error {
+	output, err := r.runner.Run(ctx, "ip", []string{"-o", "-4", "addr", "show"}, "")
+	if err != nil {
+		return err
+	}
+	local := map[string]bool{}
+	for _, field := range strings.Fields(output) {
+		if prefix, parseErr := netip.ParsePrefix(field); parseErr == nil && prefix.Addr().Is4() {
+			local[prefix.Addr().String()] = true
+		}
+	}
+	for _, service := range services {
+		if !local[service.Address] {
+			return fmt.Errorf("listen address %s is not assigned to this node", service.Address)
+		}
+	}
+	return nil
+}
+
+func unionServices(first, second []Service) []Service {
+	services := map[string]Service{}
+	for _, source := range append(append([]Service(nil), first...), second...) {
+		key := serviceKey(source)
+		target, exists := services[key]
+		if !exists {
+			target = source
+			target.Destinations = nil
+		}
+		destinations := map[string]Destination{}
+		for _, destination := range target.Destinations {
+			destinations[destinationKey(destination)] = destination
+		}
+		for _, destination := range source.Destinations {
+			destinations[destinationKey(destination)] = destination
+		}
+		target.Destinations = target.Destinations[:0]
+		for _, destination := range destinations {
+			target.Destinations = append(target.Destinations, destination)
+		}
+		sort.Slice(target.Destinations, func(i, j int) bool { return destinationKey(target.Destinations[i]) < destinationKey(target.Destinations[j]) })
+		services[key] = target
+	}
+	result := make([]Service, 0, len(services))
+	for _, service := range services {
+		result = append(result, service)
+	}
+	sort.Slice(result, func(i, j int) bool { return serviceKey(result[i]) < serviceKey(result[j]) })
+	return result
+}
+
+func compileServices(config domain.ProfileConfig, vip string) []Service {
+	var result []Service
+	for _, listener := range config.Listeners {
+		if !listener.Enabled {
+			continue
+		}
+		for _, protocol := range listener.Protocols {
+			address := vip
+			if listener.ListenAddress != "" && listener.ListenAddress != "0.0.0.0" {
+				address = listener.ListenAddress
+			}
+			service := Service{Protocol: protocol, Address: address, Port: listener.ListenPort, Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs}
+			for _, backend := range listener.Backends {
+				if backend.Enabled {
+					service.Destinations = append(service.Destinations, Destination{ID: backend.ID, Address: backend.Address, Port: backend.Port, Weight: backend.Weight})
+				}
+			}
+			sort.Slice(service.Destinations, func(i, j int) bool { return destinationKey(service.Destinations[i]) < destinationKey(service.Destinations[j]) })
+			result = append(result, service)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return serviceKey(result[i]) < serviceKey(result[j]) })
+	return result
+}
+
+func (r *Reconciler) applyIPVS(ctx context.Context, oldServices, desiredServices []Service) error {
+	oldMap, newMap := map[string]Service{}, map[string]Service{}
+	for _, service := range oldServices {
+		oldMap[serviceKey(service)] = service
+	}
+	for _, service := range desiredServices {
+		newMap[serviceKey(service)] = service
+	}
+	for key, service := range newMap {
+		old, existed := oldMap[key]
+		if err := r.ensureService(ctx, service, existed); err != nil {
+			return err
+		}
+		oldDestinations := map[string]Destination{}
+		if existed {
+			for _, destination := range old.Destinations {
+				oldDestinations[destinationKey(destination)] = destination
+			}
+		}
+		newDestinations := map[string]Destination{}
+		for _, destination := range service.Destinations {
+			newDestinations[destinationKey(destination)] = destination
+			if err := r.ensureDestination(ctx, service, destination, oldDestinations[destinationKey(destination)].Address != ""); err != nil {
+				return err
+			}
+		}
+		for destinationKey, destination := range oldDestinations {
+			if _, keep := newDestinations[destinationKey]; keep {
+				continue
+			}
+			_ = r.setDestinationWeight(ctx, service, destination, 0)
+			if err := r.deleteDestination(ctx, service, destination); err != nil {
+				return err
+			}
+		}
+	}
+	for key, service := range oldMap {
+		if _, keep := newMap[key]; keep {
+			continue
+		}
+		if err := r.deleteService(ctx, service); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) ensureService(ctx context.Context, service Service, existed bool) error {
+	action := "-A"
+	if existed {
+		action = "-E"
+	}
+	args := []string{action, protocolFlag(service.Protocol), virtualAddress(service), "-s", service.Scheduler}
+	if service.AffinitySecs > 0 {
+		args = append(args, "-p", strconv.Itoa(service.AffinitySecs))
+	}
+	_, err := r.runner.Run(ctx, "ipvsadm", args, "")
+	if err != nil && existed {
+		args[0] = "-A"
+		_, err = r.runner.Run(ctx, "ipvsadm", args, "")
+	}
+	return err
+}
+
+func (r *Reconciler) ensureDestination(ctx context.Context, service Service, destination Destination, existed bool) error {
+	action := "-a"
+	if existed {
+		action = "-e"
+	}
+	args := []string{action, protocolFlag(service.Protocol), virtualAddress(service), "-r", realAddress(destination), "-m", "-w", strconv.Itoa(destination.Weight)}
+	_, err := r.runner.Run(ctx, "ipvsadm", args, "")
+	if err != nil && existed {
+		args[0] = "-a"
+		_, err = r.runner.Run(ctx, "ipvsadm", args, "")
+	}
+	return err
+}
+
+func (r *Reconciler) deleteDestination(ctx context.Context, service Service, destination Destination) error {
+	_, err := r.runner.Run(ctx, "ipvsadm", []string{"-d", protocolFlag(service.Protocol), virtualAddress(service), "-r", realAddress(destination)}, "")
+	return err
+}
+
+func (r *Reconciler) deleteService(ctx context.Context, service Service) error {
+	_, err := r.runner.Run(ctx, "ipvsadm", []string{"-D", protocolFlag(service.Protocol), virtualAddress(service)}, "")
+	return err
+}
+
+func (r *Reconciler) setDestinationWeight(ctx context.Context, service Service, destination Destination, weight int) error {
+	_, err := r.runner.Run(ctx, "ipvsadm", []string{"-e", protocolFlag(service.Protocol), virtualAddress(service), "-r", realAddress(destination), "-m", "-w", strconv.Itoa(weight)}, "")
+	return err
+}
+
+func (r *Reconciler) configureKernel(ctx context.Context) error {
+	values := map[string]string{
+		"net.ipv4.ip_forward":                     "1",
+		"net.ipv4.vs.conntrack":                   "1",
+		"net.ipv4.vs.snat_reroute":                "1",
+		"net.ipv4.vs.expire_nodest_conn":          "1",
+		"net.ipv4.vs.expire_quiescent_template":   "1",
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, err := r.runner.Run(ctx, "sysctl", []string{"-w", key + "=" + values[key]}, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) warmRoutes(ctx context.Context, services []Service) error {
+	seen := map[string]bool{}
+	var failures []string
+	for _, service := range services {
+		for _, destination := range service.Destinations {
+			if seen[destination.Address] {
+				continue
+			}
+			seen[destination.Address] = true
+			if _, err := r.runner.Run(ctx, "ip", []string{"-4", "route", "get", destination.Address}, ""); err != nil {
+				failures = append(failures, err.Error())
+				continue
+			}
+			pingCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+			_, err := r.runner.Run(pingCtx, "ping", []string{"-n", "-c", "1", "-W", "1", destination.Address}, "")
+			cancel()
+			if err != nil {
+				failures = append(failures, destination.Address+": "+err.Error())
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func (r *Reconciler) applyFirewall(ctx context.Context, services []Service) error {
+	filter := []string{"*filter", ":EZHIKLB-FORWARD - [0:0]", "-F EZHIKLB-FORWARD"}
+	nat := []string{"*nat", ":EZHIKLB-SNAT - [0:0]", "-F EZHIKLB-SNAT"}
+	for _, service := range services {
+		for _, destination := range service.Destinations {
+			proto := string(service.Protocol)
+			filter = append(filter,
+				fmt.Sprintf("-A EZHIKLB-FORWARD -p %s -d %s --dport %d -j ACCEPT", proto, destination.Address, destination.Port),
+				fmt.Sprintf("-A EZHIKLB-FORWARD -p %s -s %s --sport %d -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", proto, destination.Address, destination.Port))
+			source, err := r.routeSource(ctx, destination.Address)
+			if err != nil {
+				return err
+			}
+			nat = append(nat, fmt.Sprintf("-A EZHIKLB-SNAT -p %s -d %s --dport %d -m ipvs --ipvs --vproto %s --vaddr %s --vport %d --vdir ORIGINAL -j SNAT --to-source %s", proto, destination.Address, destination.Port, proto, service.Address, service.Port, source))
+		}
+	}
+	filter = append(filter, "COMMIT", "")
+	nat = append(nat, "COMMIT", "")
+	if _, err := r.runner.Run(ctx, "iptables-restore", []string{"--noflush"}, strings.Join(filter, "\n")); err != nil {
+		return err
+	}
+	if _, err := r.runner.Run(ctx, "iptables-restore", []string{"--noflush"}, strings.Join(nat, "\n")); err != nil {
+		return err
+	}
+	if err := r.ensureJump(ctx, "filter", "FORWARD", "EZHIKLB-FORWARD"); err != nil {
+		return err
+	}
+	return r.ensureJump(ctx, "nat", "POSTROUTING", "EZHIKLB-SNAT")
+}
+
+func (r *Reconciler) ensureJump(ctx context.Context, table, parent, child string) error {
+	args := []string{"-w", "5"}
+	if table != "filter" {
+		args = append(args, "-t", table)
+	}
+	check := append(append([]string{}, args...), "-C", parent, "-j", child)
+	if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
+		return nil
+	}
+	insert := append(append([]string{}, args...), "-I", parent, "1", "-j", child)
+	_, err := r.runner.Run(ctx, "iptables", insert, "")
+	return err
+}
+
+func (r *Reconciler) routeSource(ctx context.Context, address string) (string, error) {
+	output, err := r.runner.Run(ctx, "ip", []string{"-4", "route", "get", address}, "")
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(output)
+	for i, field := range fields {
+		if field == "src" && i+1 < len(fields) {
+			if addr, parseErr := netip.ParseAddr(fields[i+1]); parseErr == nil && addr.Is4() {
+				return fields[i+1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("route to %s has no IPv4 source: %s", address, strings.TrimSpace(output))
+}
+
+func (r *Reconciler) resolveIngress(ctx context.Context, configured string) (string, error) {
+	if configured != "" && configured != "0.0.0.0" {
+		addr, err := netip.ParseAddr(configured)
+		if err != nil || !addr.Is4() {
+			return "", fmt.Errorf("invalid ingress address %q", configured)
+		}
+		return configured, nil
+	}
+	return r.routeSource(ctx, "1.1.1.1")
+}
+
+func (r *Reconciler) loadState() (AppliedState, error) {
+	var state AppliedState
+	data, err := os.ReadFile(r.statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return state, nil
+	}
+	if err != nil {
+		return state, err
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return state, fmt.Errorf("parse agent state: %w", err)
+	}
+	return state, nil
+}
+
+func (r *Reconciler) saveState(state AppliedState) error {
+	if err := os.MkdirAll(filepath.Dir(r.statePath), 0750); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := r.statePath + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0640); err != nil {
+		return err
+	}
+	return os.Rename(tmp, r.statePath)
+}
+
+func serviceKey(service Service) string { return fmt.Sprintf("%s/%s:%d", service.Protocol, service.Address, service.Port) }
+func destinationKey(destination Destination) string { return fmt.Sprintf("%s:%d", destination.Address, destination.Port) }
+func protocolFlag(protocol domain.Protocol) string {
+	if protocol == domain.ProtocolTCP {
+		return "-t"
+	}
+	return "-u"
+}
+func virtualAddress(service Service) string { return fmt.Sprintf("%s:%d", service.Address, service.Port) }
+func realAddress(destination Destination) string { return fmt.Sprintf("%s:%d", destination.Address, destination.Port) }
