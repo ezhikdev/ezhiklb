@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v0.1.0-alpha.1` and download the generated
-   `ezhiklb_0.1.0-alpha.1_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v0.1.0-alpha.2` and download the generated
+   `ezhiklb_0.1.0-alpha.2_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -62,4 +62,3 @@ Installer backups are stored in `/var/backups/ezhiklb/<timestamp>`. The legacy
 `/etc/ezhik-udp/ezhik-udp.conf` file is never modified. If the first agent apply
 fails during migration, the installer stops the new agent and starts the old
 `ezhik-udp.service` again when it had been active before installation.
-
