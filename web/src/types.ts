@@ -55,13 +55,23 @@ export interface NodeInfo {
   id: string
   name: string
   ingress_address: string
+  observed_address: string
   profile_id: string
   desired_revision: number
   applied_revision: number
   agent_version: string
-  status: "online" | "offline" | "error" | "disabled"
+  status: "connecting" | "online" | "offline" | "error" | "disabled"
+  apply_state: "waiting" | "applying" | "applied" | "error" | "disabled"
   last_seen_at?: string
+  online_since?: string
   last_error?: string
+}
+
+export interface SystemSettings {
+  panel_port: number
+  agent_port: number
+  legacy_panel_port?: number
+  legacy_agent_port?: number
 }
 
 export interface Status {

@@ -59,4 +59,19 @@ Remote nodes support both HTTP and HTTPS. Plain HTTP requires the explicit
 `EZHIKLB_ALLOW_INSECURE=1` setting, which the panel adds to generated commands
 automatically for `http://` URLs. HTTPS is recommended across untrusted public
 networks. mTLS remains a future hardening layer and is not required for
-alpha.7.3 operation.
+alpha.8 operation.
+
+## Network listeners
+
+The control-plane binary owns two listeners. The panel UI and administrator API
+use `panel_port` (`8080` by default), while desired-state and heartbeat traffic
+use `agent_port` (`8081` by default). Both values live in SQLite so the
+unprivileged panel can change them without writing `/etc`. Saving network
+settings schedules a controlled process exit; systemd restarts the binary and
+the browser moves to the new panel port.
+
+For migration, the panel listener continues accepting the alpha.7 agent paths.
+After a port change, the immediately previous panel and agent ports can remain
+as agent-only listeners; this bounded pair covers nodes enrolled by both old and
+new releases without exposing another administrator UI. Temporary node
+disablement blocks credential validation without deleting the credential.

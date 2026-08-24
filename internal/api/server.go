@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +25,8 @@ type Server struct {
 	secure     bool
 	webDir     string
 	logger     *slog.Logger
+	settings   domain.SystemSettings
+	restart    func()
 }
 
 type Options struct {
@@ -32,6 +35,8 @@ type Options struct {
 	Secure     bool
 	WebDir     string
 	Logger     *slog.Logger
+	Settings   domain.SystemSettings
+	Restart    func()
 }
 
 func New(st *store.Store, opts Options) (*Server, error) {
@@ -41,10 +46,16 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	return &Server{store: st, adminToken: opts.AdminToken, agentToken: opts.AgentToken, secure: opts.Secure, webDir: opts.WebDir, logger: opts.Logger}, nil
+	if opts.Settings.PanelPort == 0 { opts.Settings.PanelPort = 8080 }
+	if opts.Settings.AgentPort == 0 { opts.Settings.AgentPort = 8081 }
+	return &Server{store: st, adminToken: opts.AdminToken, agentToken: opts.AgentToken, secure: opts.Secure, webDir: opts.WebDir, logger: opts.Logger, settings: opts.Settings, restart: opts.Restart}, nil
 }
 
 func (s *Server) Handler() http.Handler {
+	return s.PanelHandler()
+}
+
+func (s *Server) PanelHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
@@ -61,16 +72,29 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/nodes", s.admin(http.HandlerFunc(s.createNode)))
 	mux.Handle("PUT /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.updateNode)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.deleteNode)))
+	mux.Handle("PUT /api/v1/nodes/{id}/enabled", s.admin(http.HandlerFunc(s.setNodeEnabled)))
 	mux.Handle("POST /api/v1/nodes/{id}/rotate-token", s.admin(http.HandlerFunc(s.rotateNodeToken)))
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", s.admin(http.HandlerFunc(s.revokeNode)))
 	mux.Handle("POST /api/v1/nodes/{id}/health-probe", s.admin(http.HandlerFunc(s.requestHealthProbe)))
 	mux.Handle("GET /api/v1/health", s.admin(http.HandlerFunc(s.listHealth)))
 	mux.Handle("GET /api/v1/stats", s.admin(http.HandlerFunc(s.listStats)))
 	mux.Handle("PUT /api/v1/nodes/{id}/profile", s.admin(http.HandlerFunc(s.assignProfile)))
+	mux.Handle("GET /api/v1/settings", s.admin(http.HandlerFunc(s.getSettings)))
+	mux.Handle("PUT /api/v1/settings", s.admin(http.HandlerFunc(s.updateSettings)))
+	// Alpha.8 keeps the old panel-port agent routes during migration. Newly
+	// enrolled nodes use the dedicated agent listener.
 	mux.Handle("GET /agent/v1/nodes/{id}/desired", s.agent(http.HandlerFunc(s.desiredState)))
 	mux.Handle("POST /agent/v1/nodes/{id}/heartbeat", s.agent(http.HandlerFunc(s.heartbeat)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]string{"status": "ok"}) })
 	mux.Handle("/", s.static())
+	return s.securityHeaders(s.recoverPanics(s.logRequests(mux)))
+}
+
+func (s *Server) AgentHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /agent/v1/nodes/{id}/desired", s.agent(http.HandlerFunc(s.desiredState)))
+	mux.Handle("POST /agent/v1/nodes/{id}/heartbeat", s.agent(http.HandlerFunc(s.heartbeat)))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]string{"status": "ok"}) })
 	return s.securityHeaders(s.recoverPanics(s.logRequests(mux)))
 }
 
@@ -264,6 +288,18 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) setNodeEnabled(w http.ResponseWriter, r *http.Request) {
+	var body struct{ Enabled bool `json:"enabled"` }
+	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
+	if err := s.store.SetNodeEnabled(r.Context(), r.PathValue("id"), body.Enabled); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+	} else if err != nil {
+		writeError(w, http.StatusConflict, "cannot_change_state", err.Error())
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func (s *Server) rotateNodeToken(w http.ResponseWriter, r *http.Request) {
 	token, err := s.store.RotateNodeCredential(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Remote node credential not found"); return }
@@ -318,6 +354,27 @@ func (s *Server) assignProfile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.store.GetSystemSettings(r.Context(), s.settings)
+	if err != nil { s.internalError(w, err); return }
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var next domain.SystemSettings
+	if err := decodeJSON(r, &next); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
+	if next.PanelPort != s.settings.PanelPort { next.LegacyPanelPort = s.settings.PanelPort } else { next.LegacyPanelPort = s.settings.LegacyPanelPort }
+	if next.AgentPort != s.settings.AgentPort { next.LegacyAgentPort = s.settings.AgentPort } else { next.LegacyAgentPort = s.settings.LegacyAgentPort }
+	if err := s.store.UpdateSystemSettings(r.Context(), next); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"settings": next, "restarting": true})
+	if s.restart != nil {
+		go func() { time.Sleep(350 * time.Millisecond); s.restart() }()
+	}
+}
+
 func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 	state, err := s.store.DesiredState(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
@@ -342,6 +399,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		Version         string `json:"version"`
 		AppliedRevision int64  `json:"applied_revision"`
 		ApplyError      string `json:"apply_error"`
+		ApplyState      string `json:"apply_state"`
 		Health          []domain.BackendHealth `json:"health"`
 		Stats           []domain.ServiceStat `json:"stats"`
 	}
@@ -349,7 +407,9 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, body.AppliedRevision, body.ApplyError, body.Health, body.Stats); errors.Is(err, store.ErrNotFound) {
+	observedAddress := remoteIPv4(r)
+	if r.PathValue("id") == "local" && (observedAddress == "127.0.0.1" || observedAddress == "::1") { observedAddress = "" }
+	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
 		s.internalError(w, err)
@@ -373,12 +433,21 @@ func (s *Server) agent(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		value := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		nodeID := r.PathValue("id")
-		if !(nodeID == "local" && sameSecret(value, s.agentToken)) && !s.store.ValidateNodeCredential(r.Context(), nodeID, value) {
+		localValid := nodeID == "local" && s.store.NodeEnabled(r.Context(), nodeID) && sameSecret(value, s.agentToken)
+		if !localValid && !s.store.ValidateNodeCredential(r.Context(), nodeID, value) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid agent credentials")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func remoteIPv4(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil { host = r.RemoteAddr }
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || ip.To4() == nil { return "" }
+	return ip.String()
 }
 
 func (s *Server) static() http.Handler {
@@ -469,6 +538,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-alpha.7.3"
+const Version = "0.1.0-alpha.8"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

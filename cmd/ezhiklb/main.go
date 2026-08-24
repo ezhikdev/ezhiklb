@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,43 +42,77 @@ func main() {
 		logger.Error("bootstrap database", "error", err)
 		os.Exit(1)
 	}
-	port, err := strconv.Atoi(env("EZHIKLB_PORT", "8080"))
-	if err != nil || port < 1 || port > 65535 {
-		logger.Error("invalid EZHIKLB_PORT")
+	panelPort := parsePort(logger, "EZHIKLB_PORT", "8080")
+	agentPort := parsePort(logger, "EZHIKLB_AGENT_PORT", "8081")
+	settings, err := st.GetSystemSettings(context.Background(), domain.SystemSettings{PanelPort: panelPort, AgentPort: agentPort})
+	if err != nil {
+		logger.Error("load system settings", "error", err)
 		os.Exit(1)
 	}
+	if settings.PanelPort == settings.AgentPort {
+		logger.Error("panel and agent ports must be different")
+		os.Exit(1)
+	}
+	restart := make(chan struct{}, 1)
 	app, err := api.New(st, api.Options{
 		AdminToken: os.Getenv("EZHIKLB_ADMIN_TOKEN"),
 		AgentToken: os.Getenv("EZHIKLB_AGENT_TOKEN"),
 		Secure:     env("EZHIKLB_SECURE_COOKIE", "1") == "1",
 		WebDir:     env("EZHIKLB_WEB_DIR", "/usr/share/ezhiklb/web"),
 		Logger:     logger,
+		Settings:   settings,
+		Restart: func() { select { case restart <- struct{}{}: default: } },
 	})
 	if err != nil {
 		logger.Error("configure server", "error", err)
 		os.Exit(1)
 	}
-	httpServer := &http.Server{
-		Addr:              api.ListenAddress(env("EZHIKLB_HOST", "127.0.0.1"), port),
-		Handler:           app.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+	newServer := func(address string, handler http.Handler) *http.Server { return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second} }
+	panelServer := newServer(api.ListenAddress(env("EZHIKLB_HOST", "127.0.0.1"), settings.PanelPort), app.PanelHandler())
+	agentHost := env("EZHIKLB_AGENT_HOST", "0.0.0.0")
+	agentServer := newServer(api.ListenAddress(agentHost, settings.AgentPort), app.AgentHandler())
+	servers := []struct { name string; server *http.Server }{{"panel", panelServer}, {"agent API", agentServer}}
+	if settings.LegacyAgentPort > 0 && settings.LegacyAgentPort != settings.AgentPort && settings.LegacyAgentPort != settings.PanelPort {
+		servers = append(servers, struct { name string; server *http.Server }{"legacy agent API", newServer(api.ListenAddress(agentHost, settings.LegacyAgentPort), app.AgentHandler())})
 	}
-	go func() {
-		logger.Info("EzhikLB panel started", "address", httpServer.Addr, "version", api.Version)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("http server", "error", err)
-			os.Exit(1)
-		}
-	}()
+	if settings.LegacyPanelPort > 0 && settings.LegacyPanelPort != settings.AgentPort && settings.LegacyPanelPort != settings.PanelPort && settings.LegacyPanelPort != settings.LegacyAgentPort {
+		servers = append(servers, struct { name string; server *http.Server }{"legacy panel agent API", newServer(api.ListenAddress(agentHost, settings.LegacyPanelPort), app.AgentHandler())})
+	}
+	serverErrors := make(chan error, len(servers))
+	serve := func(name string, server *http.Server) {
+		logger.Info("EzhikLB "+name+" started", "address", server.Addr, "version", api.Version)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { serverErrors <- fmt.Errorf("%s server: %w", name, err) }
+	}
+	for _, item := range servers { go serve(item.name, item.server) }
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	restarting := false
+	failed := false
+	select {
+	case <-stop:
+	case <-restart:
+		restarting = true
+	case err := <-serverErrors:
+		failed = true
+		logger.Error("serve", "error", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = httpServer.Shutdown(ctx)
+	for _, item := range servers { _ = item.server.Shutdown(ctx) }
+	if restarting || failed {
+		_ = st.Close()
+		if restarting { os.Exit(75) }
+		os.Exit(1)
+	}
+}
+
+func parsePort(logger *slog.Logger, key, fallback string) int {
+	port, err := strconv.Atoi(env(key, fallback))
+	if err != nil || port < 1 || port > 65535 {
+		logger.Error("invalid port", "variable", key)
+		os.Exit(1)
+	}
+	return port
 }
 
 func env(key, fallback string) string {

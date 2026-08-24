@@ -23,13 +23,22 @@
 
 Remote enrollment supports HTTPS and explicitly enabled HTTP. The panel adds the HTTP permission to generated enrollment commands automatically; HTTPS remains recommended on untrusted public networks.
 
+## Alpha.8 — node operations
+
+1. Dedicated configurable ports for the web panel and agent API — implemented.
+2. Safe save/restart/redirect flow with previous panel/API-port compatibility — implemented.
+3. Live enrollment wizard with a single-line command and connection animation — implemented.
+4. Automatic observed IPv4, online uptime, last heartbeat and apply-stage telemetry — implemented.
+5. Simplified edit, enable/disable and delete actions — implemented.
+6. Node detail view and expandable per-node IPVS distribution — implemented.
+
 ## Beta gate
 
-Alpha.7 is the UI/stabilization release. A beta tag requires all of the following on disposable VPS infrastructure:
+Alpha.8 is the node-management release. A beta tag requires all of the following on disposable VPS infrastructure:
 
 1. Panel upgrade with database preservation and rollback verified.
 2. At least two remote nodes connected over the configured HTTP/HTTPS transport for 72 hours without reconciliation drift; public HTTPS must also be tested before beta.
 3. UDP idle/resume, TCP forwarding, dual protocol, affinity, weighted distribution and ICMP failover checks passed.
-4. Node credential rotation/revocation and profile rollback tested end to end.
+4. Node disable/re-enable, deletion, port migration and profile rollback tested end to end.
 5. Reboot recovery tested for the panel and every node.
 6. Backup/restore rehearsal completed before using a primary server.

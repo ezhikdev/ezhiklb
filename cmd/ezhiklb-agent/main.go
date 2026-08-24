@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-alpha.7.3"
+const version = "0.1.0-alpha.8"
 
 type client struct {
 	baseURL string
@@ -31,8 +32,8 @@ type client struct {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	nodeID := env("EZHIKLB_NODE_ID", "local")
-	panelURL := strings.TrimRight(env("EZHIKLB_PANEL_URL", "http://127.0.0.1:8080"), "/")
-	if strings.HasPrefix(panelURL, "http://") && panelURL != "http://127.0.0.1:8080" && panelURL != "http://localhost:8080" && env("EZHIKLB_ALLOW_INSECURE", "0") != "1" {
+	panelURL := strings.TrimRight(env("EZHIKLB_PANEL_URL", "http://127.0.0.1:8081"), "/")
+	if strings.HasPrefix(panelURL, "http://") && !isLoopbackURL(panelURL) && env("EZHIKLB_ALLOW_INSECURE", "0") != "1" {
 		logger.Error("remote HTTP requires EZHIKLB_ALLOW_INSECURE=1; use HTTPS when the network is not trusted", "panel_url", panelURL)
 		os.Exit(1)
 	}
@@ -55,6 +56,7 @@ func main() {
 	var applied int64
 	var lastHealthProbe int64
 	var applyError string
+	applyState := "connecting"
 	var healthCancel context.CancelFunc
 	var healthMu sync.Mutex
 
@@ -63,7 +65,7 @@ func main() {
 		if err != nil {
 			logger.Warn("collect IPVS stats", "error", err)
 		}
-		if err := api.heartbeat(ctx, nodeID, applied, applyError, monitor.Results(), stats); err != nil {
+		if err := api.heartbeat(ctx, nodeID, applied, applyError, applyState, monitor.Results(), stats); err != nil {
 			logger.Error("send heartbeat", "error", err)
 		}
 	}
@@ -80,13 +82,17 @@ func main() {
 		lastHealthProbe = desired.HealthProbe
 		if desired.Revision != applied {
 			logger.Info("applying desired revision", "revision", desired.Revision, "profile", desired.ProfileName)
+			applyState = "applying"
+			report()
 			if err := reconciler.Reconcile(ctx, desired); err != nil {
 				applyError = err.Error()
+				applyState = "error"
 				logger.Error("apply desired state", "revision", desired.Revision, "error", err)
 				return true
 			} else {
 				applied = desired.Revision
 				applyError = ""
+				applyState = "applied"
 				healthMu.Lock()
 				if healthCancel != nil {
 					healthCancel()
@@ -154,8 +160,8 @@ func (c *client) desired(ctx context.Context, nodeID string, knownRevision, know
 	return result, true, nil
 }
 
-func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat) error {
-	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "health": health, "stats": stats})
+func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError, applyState string, health []domain.BackendHealth, stats []domain.ServiceStat) error {
+	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "apply_state": applyState, "health": health, "stats": stats})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/agent/v1/nodes/"+nodeID+"/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -179,4 +185,11 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func isLoopbackURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil { return false }
+	host := parsed.Hostname()
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }

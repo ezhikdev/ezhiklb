@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.8
+
+- Split the administrator panel and node-agent API onto configurable ports, defaulting to `8080` and `8081`.
+- Added safe in-panel port changes with automatic service restart, browser redirect and bounded previous panel/API listeners for migration.
+- Rebuilt node enrollment around a single-line scrollable command, copy action and live connecting/success animation.
+- Added automatically observed node IPv4 addresses, continuous online uptime, last heartbeat and apply-stage reporting.
+- Simplified node actions to edit, enable/disable and delete while retaining credentials during temporary disablement.
+- Added node detail dialogs with profile, revision, health, error and live IPVS route information.
+- Grouped dashboard traffic by expandable node sections.
+
 ## 0.1.0-alpha.7.3
 
 - Centered the animated checkmark precisely inside every square state control.

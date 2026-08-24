@@ -83,15 +83,25 @@ type Node struct {
 	ID              string     `json:"id"`
 	Name            string     `json:"name"`
 	IngressAddress  string     `json:"ingress_address"`
+	ObservedAddress string     `json:"observed_address"`
 	ProfileID       string     `json:"profile_id"`
 	DesiredRevision int64      `json:"desired_revision"`
 	AppliedRevision int64      `json:"applied_revision"`
 	AgentVersion    string     `json:"agent_version"`
 	Status          string     `json:"status"`
+	ApplyState      string     `json:"apply_state"`
 	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
+	OnlineSince     *time.Time `json:"online_since,omitempty"`
 	LastError       string     `json:"last_error,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type SystemSettings struct {
+	PanelPort       int `json:"panel_port"`
+	AgentPort       int `json:"agent_port"`
+	LegacyPanelPort int `json:"legacy_panel_port,omitempty"`
+	LegacyAgentPort int `json:"legacy_agent_port,omitempty"`
 }
 
 type NodeDesiredState struct {

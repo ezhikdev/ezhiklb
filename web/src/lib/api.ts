@@ -1,4 +1,4 @@
-import type { BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, ServiceStat, Status } from "../types"
+import type { BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "../types"
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -38,10 +38,11 @@ export const api = {
   createNode: (name: string, ingressAddress: string, profileID: string) => request<{ node: NodeInfo; agent_token: string }>("/api/v1/nodes", { method: "POST", body: JSON.stringify({ name, ingress_address: ingressAddress, profile_id: profileID }) }),
   updateNode: (id: string, name: string, ingressAddress: string) => request<void>(`/api/v1/nodes/${id}`, { method: "PUT", body: JSON.stringify({ name, ingress_address: ingressAddress }) }),
   deleteNode: (id: string) => request<void>(`/api/v1/nodes/${id}`, { method: "DELETE" }),
-  rotateNodeToken: (id: string) => request<{ agent_token: string }>(`/api/v1/nodes/${id}/rotate-token`, { method: "POST" }),
-  revokeNode: (id: string) => request<void>(`/api/v1/nodes/${id}/revoke`, { method: "POST" }),
+  setNodeEnabled: (id: string, enabled: boolean) => request<void>(`/api/v1/nodes/${id}/enabled`, { method: "PUT", body: JSON.stringify({ enabled }) }),
   requestHealthProbe: (id: string) => request<{ health_probe: number }>(`/api/v1/nodes/${id}/health-probe`, { method: "POST" }),
   health: () => request<BackendHealth[]>("/api/v1/health"),
   stats: () => request<ServiceStat[]>("/api/v1/stats"),
+  settings: () => request<SystemSettings>("/api/v1/settings"),
+  updateSettings: (settings: SystemSettings) => request<{ settings: SystemSettings; restarting: boolean }>("/api/v1/settings", { method: "PUT", body: JSON.stringify(settings) }),
   assignProfile: (nodeID: string, profileID: string) => request<void>(`/api/v1/nodes/${nodeID}/profile`, { method: "PUT", body: JSON.stringify({ profile_id: profileID }) }),
 }

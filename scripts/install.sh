@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-alpha.7.3"
+EZHIKLB_VERSION="0.1.0-alpha.8"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -81,7 +81,7 @@ panel_host="${EZHIKLB_HOST:-127.0.0.1}"
 if [[ -z "$EXISTING_VERSION" && ( "$ROLE" == "panel" || "$ROLE" == "panel-node" ) && -z "${EZHIKLB_HOST:-}" ]]; then
   printf '\nКак открыть панель?\n'
   printf '  1) Только на сервере и через SSH-туннель (127.0.0.1)\n'
-  printf '  2) По сети (0.0.0.0, необходимо для удалённых нод)\n'
+  printf '  2) По сети (0.0.0.0, открывает web-интерфейс извне)\n'
   read -r -p 'Доступ [1]: ' panel_access
   case "${panel_access:-1}" in
     1) panel_host="127.0.0.1" ;;
@@ -92,7 +92,7 @@ fi
 
 if [[ "$ROLE" == "node" ]]; then
   if [[ -z "${EZHIKLB_PANEL_URL:-}" ]]; then
-    read -r -p 'URL панели, доступный с этой ноды: ' EZHIKLB_PANEL_URL
+    read -r -p 'URL API нод, доступный с этого сервера: ' EZHIKLB_PANEL_URL
   fi
   if [[ -z "${EZHIKLB_NODE_ID:-}" ]]; then
     read -r -p 'ID ноды из панели: ' EZHIKLB_NODE_ID
@@ -101,10 +101,10 @@ if [[ "$ROLE" == "node" ]]; then
     read -r -s -p 'Токен ноды из панели: ' EZHIKLB_AGENT_TOKEN
     printf '\n'
   fi
-  [[ -n "${EZHIKLB_PANEL_URL:-}" ]] || die "не указан URL панели"
+  [[ -n "${EZHIKLB_PANEL_URL:-}" ]] || die "не указан URL API нод"
   [[ -n "${EZHIKLB_NODE_ID:-}" ]] || die "не указан ID ноды"
   [[ ${#EZHIKLB_AGENT_TOKEN} -ge 24 ]] || die "токен ноды должен содержать не менее 24 символов"
-  if [[ "$EZHIKLB_PANEL_URL" == http://* && "$EZHIKLB_PANEL_URL" != "http://127.0.0.1:8080" && "$EZHIKLB_PANEL_URL" != "http://localhost:8080" && "${EZHIKLB_ALLOW_INSECURE:-0}" != "1" ]]; then
+  if [[ "$EZHIKLB_PANEL_URL" == http://* && "$EZHIKLB_PANEL_URL" != http://127.0.0.1:* && "$EZHIKLB_PANEL_URL" != http://localhost:* && "${EZHIKLB_ALLOW_INSECURE:-0}" != "1" ]]; then
     printf '\nВнимание: HTTP не шифрует токен и конфигурацию ноды.\n'
     read -r -p 'Разрешить постоянное подключение по HTTP? [y/N]: ' allow_http
     case "${allow_http:-n}" in
@@ -167,11 +167,15 @@ if [[ ! -f "$ENV_FILE" ]]; then
   admin_token="${EZHIKLB_ADMIN_TOKEN:-$(openssl rand -hex 32)}"
   agent_token="${EZHIKLB_AGENT_TOKEN:-$(openssl rand -hex 32)}"
   ingress="${EZHIKLB_INGRESS_ADDRESS:-$(detect_server_ipv4)}"
-  panel_url="${EZHIKLB_PANEL_URL:-http://127.0.0.1:8080}"
+  panel_port="${EZHIKLB_PORT:-8080}"
+  agent_port="${EZHIKLB_AGENT_PORT:-8081}"
+  panel_url="${EZHIKLB_PANEL_URL:-http://127.0.0.1:${agent_port}}"
   cat >"$ENV_FILE" <<EOF
 EZHIKLB_ROLE=${ROLE}
 EZHIKLB_HOST=${panel_host}
-EZHIKLB_PORT=8080
+EZHIKLB_PORT=${panel_port}
+EZHIKLB_AGENT_HOST=${EZHIKLB_AGENT_HOST:-0.0.0.0}
+EZHIKLB_AGENT_PORT=${agent_port}
 EZHIKLB_SECURE_COOKIE=0
 EZHIKLB_DATABASE=${DATA_DIR}/ezhiklb.db
 EZHIKLB_WEB_DIR=${WEB_DIR}
@@ -188,6 +192,8 @@ EOF
   chown root:ezhiklb "$ENV_FILE"
 else
   sed -i "s/^EZHIKLB_ROLE=.*/EZHIKLB_ROLE=${ROLE}/" "$ENV_FILE"
+  grep -q '^EZHIKLB_AGENT_HOST=' "$ENV_FILE" || printf 'EZHIKLB_AGENT_HOST=0.0.0.0\n' >>"$ENV_FILE"
+  grep -q '^EZHIKLB_AGENT_PORT=' "$ENV_FILE" || printf 'EZHIKLB_AGENT_PORT=8081\n' >>"$ENV_FILE"
 fi
 
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
@@ -276,11 +282,13 @@ systemctl daemon-reload
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
   systemctl enable ezhiklb.service
   systemctl restart ezhiklb.service
+  installed_panel_port="$(sed -n 's/^EZHIKLB_PORT=//p' "$ENV_FILE")"
+  installed_panel_port="${installed_panel_port:-8080}"
   for _ in {1..20}; do
-    curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
+    curl -fsS "http://127.0.0.1:${installed_panel_port}/healthz" >/dev/null 2>&1 && break
     sleep 1
   done
-  if ! curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then
+  if ! systemctl is-active --quiet ezhiklb.service; then
     systemctl status ezhiklb.service --no-pager || true
     restore_previous_release
     [[ "$legacy_was_active" == "1" ]] && systemctl start ezhik-udp.service || true
@@ -317,20 +325,26 @@ log "${EZHIKLB_VERSION} installed successfully"
 printf 'Role: %s\n' "$ROLE"
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
   installed_host="$(sed -n 's/^EZHIKLB_HOST=//p' "$ENV_FILE")"
+  installed_panel_port="$(sed -n 's/^EZHIKLB_PORT=//p' "$ENV_FILE")"
+  installed_agent_port="$(sed -n 's/^EZHIKLB_AGENT_PORT=//p' "$ENV_FILE")"
+  installed_panel_port="${installed_panel_port:-8080}"
+  installed_agent_port="${installed_agent_port:-8081}"
+  panel_ipv4="$(sed -n 's/^EZHIKLB_INGRESS_ADDRESS=//p' "$ENV_FILE")"
+  if [[ -z "$panel_ipv4" || "$panel_ipv4" == "0.0.0.0" || "$panel_ipv4" == "127.0.0.1" ]]; then
+    panel_ipv4="$(detect_server_ipv4)"
+  fi
   if [[ "$installed_host" == "127.0.0.1" ]]; then
-    printf 'Local panel: http://127.0.0.1:8080\n'
-    printf 'SSH tunnel: ssh -L 8080:127.0.0.1:8080 root@YOUR_SERVER\n'
+    printf 'Local panel: http://127.0.0.1:%s\n' "$installed_panel_port"
+    printf 'SSH tunnel: ssh -L %s:127.0.0.1:%s root@YOUR_SERVER\n' "$installed_panel_port" "$installed_panel_port"
   else
-    panel_ipv4="$(sed -n 's/^EZHIKLB_INGRESS_ADDRESS=//p' "$ENV_FILE")"
-    if [[ -z "$panel_ipv4" || "$panel_ipv4" == "0.0.0.0" || "$panel_ipv4" == "127.0.0.1" ]]; then
-      panel_ipv4="$(detect_server_ipv4)"
-    fi
     if [[ -n "$panel_ipv4" ]]; then
-      printf 'Open in browser: http://%s:8080\n' "$panel_ipv4"
-      printf 'Node API: http://%s:8080\n' "$panel_ipv4"
+      printf 'Open in browser: http://%s:%s\n' "$panel_ipv4" "$installed_panel_port"
     else
       printf 'IPv4 detection failed. Set EZHIKLB_INGRESS_ADDRESS in %s and restart the panel.\n' "$ENV_FILE"
     fi
+  fi
+  if [[ -n "$panel_ipv4" ]]; then
+    printf 'Node API: http://%s:%s\n' "$panel_ipv4" "$installed_agent_port"
   fi
   printf 'Admin token: %s\n' "$(sed -n 's/^EZHIKLB_ADMIN_TOKEN=//p' "$ENV_FILE")"
 fi

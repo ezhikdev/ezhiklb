@@ -2,7 +2,7 @@
 
 **EzhikLB (Ezhik Load Balancer)** — панель управления TCP- и UDP-балансировкой на Linux. Панель хранит профили, а агенты на нодах применяют их через IPVS в ядре Linux.
 
-Текущая версия: **0.1.0-alpha.7.3 pre-release**.
+Текущая версия: **0.1.0-alpha.8 pre-release**.
 
 ## Что уже работает
 
@@ -22,7 +22,7 @@
 
 - Debian или Ubuntu `amd64`;
 - права `sudo` или `root`;
-- доступ ноды к адресу панели;
+- доступ ноды к отдельному API панели;
 - открытые TCP/UDP-порты, используемые для балансировки.
 
 ## Установка одной командой
@@ -30,10 +30,10 @@
 Команда одинакова для панели и ноды. После запуска установщик сам предложит выбрать вариант:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-alpha.7.3 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-alpha.8 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
-> Команда заработает после публикации тега `v0.1.0-alpha.7.3`. Ошибка `404` означает, что архив pre-release ещё не собран.
+> Команда заработает после публикации тега `v0.1.0-alpha.8`. Ошибка `404` означает, что архив pre-release ещё не собран.
 
 Меню установщика:
 
@@ -43,8 +43,8 @@ sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_ver
 3) Панель + локальная нода
 ```
 
-- **Панель** — web-интерфейс, API, профили и управление нодами.
-- **Нода** — агент IPVS. Установщик запросит адрес панели, ID и токен.
+- **Панель** — web-интерфейс на порту `8080` и отдельный API нод на `8081`.
+- **Нода** — агент IPVS. Установщик запросит адрес API нод, ID и токен.
 - **Панель + локальная нода** — оба компонента на одном VPS.
 
 Повторный запуск этой же команды обновляет установленную версию. Настройки и база сохраняются, а перед обновлением создаётся резервная копия.
@@ -54,7 +54,7 @@ sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_ver
 При установке выберите один из режимов:
 
 1. **Только локально** — безопасный доступ через SSH-туннель.
-2. **По сети** — нужен для подключения удалённых нод.
+2. **По сети** — открывает сам web-интерфейс на внешнем адресе.
 
 SSH-туннель создаётся **на вашем компьютере**:
 
@@ -64,7 +64,7 @@ ssh -L 8080:127.0.0.1:8080 root@IP_ПАНЕЛИ
 
 После этого откройте <http://127.0.0.1:8080>.
 
-При сетевом режиме откройте `http://IP_ПАНЕЛИ:8080`. TCP-порт `8080` должен быть разрешён в firewall VPS или панели хостинга.
+При сетевом режиме откройте `http://IP_ПАНЕЛИ:8080`. Для удалённых нод откройте TCP-порт `8081`. Оба порта можно изменить в разделе **Настройки**; после сохранения панель перезапустится и браузер перейдёт на новый адрес.
 
 Посмотреть токен администратора:
 
@@ -75,13 +75,13 @@ sudo sed -n 's/^EZHIKLB_ADMIN_TOKEN=//p' /etc/ezhiklb/ezhiklb.env
 ## Как добавить удалённую ноду
 
 1. Откройте **Ноды → Добавить ноду**.
-2. Введите название, например `DE-1`, и нажмите **Далее**.
-3. Проверьте адрес панели и скопируйте готовую команду.
+2. Введите название, например `server-1`, и нажмите **Далее**.
+3. Проверьте адрес API нод, обычно `http://IP_ПАНЕЛИ:8081`, и скопируйте готовую команду.
 4. Вставьте команду одной строкой на новой VPS.
 
 Команда сама установит зависимости и агент, проверит checksum, передаст ID и токен, подключит ноду и применит назначенный профиль.
 
-Через несколько секунд в панели должен появиться статус **online**, а значения `desired` и `actual` должны совпасть. Профиль можно сменить прямо в списке нод.
+Окно само покажет ожидание heartbeat, а после подключения — зелёную галочку. В списке появятся автоматически определённый IPv4, uptime связи, последняя активность и этап применения профиля.
 
 ### HTTP и HTTPS
 
@@ -128,6 +128,9 @@ sudo journalctl -u ezhiklb -u ezhiklb-agent -f
 # Проверка панели
 curl -fsS http://127.0.0.1:8080/healthz && echo
 
+# Проверка отдельного API нод
+curl -fsS http://127.0.0.1:8081/healthz && echo
+
 # Состояние агента
 sudo cat /var/lib/ezhiklb-agent/state.json
 
@@ -145,7 +148,7 @@ sudo tar --ignore-failed-read -czf "/root/ezhiklb-backup-$(date +%Y%m%d-%H%M%S).
 
 Автоматические копии перед обновлением находятся в `/var/backups/ezhiklb`.
 
-## Проверка `alpha.7.3` на двух VPS
+## Проверка `alpha.8` на двух VPS
 
 На первой VPS установите **Панель** или **Панель + локальная нода** и выберите сетевой доступ. Затем создайте ноду в панели и выполните полученную команду на второй VPS.
 
@@ -164,25 +167,25 @@ sudo systemctl status ezhiklb-agent --no-pager -l && sudo journalctl -u ezhiklb-
 - применение новой ревизии профиля;
 - восстановление агента после перезагрузки VPS.
 
-## Публикация `alpha.7.3 pre-release`
+## Публикация `alpha.8 pre-release`
 
 Сначала загрузите изменённые файлы в `main`, затем создайте тег **обязательно с буквой `v`**:
 
 ```bash
-git tag v0.1.0-alpha.7.3 && git push origin v0.1.0-alpha.7.3
+git tag v0.1.0-alpha.8 && git push origin v0.1.0-alpha.8
 ```
 
 Правильный тег автоматически создаст GitHub Pre-release и два файла:
 
 ```text
-ezhiklb_0.1.0-alpha.7.3_linux_amd64.tar.gz
-ezhiklb_0.1.0-alpha.7.3_linux_amd64.tar.gz.sha256
+ezhiklb_0.1.0-alpha.8_linux_amd64.tar.gz
+ezhiklb_0.1.0-alpha.8_linux_amd64.tar.gz.sha256
 ```
 
-Тег `0.1.0-alpha.7.3` без `v` workflow не запускает.
+Тег `0.1.0-alpha.8` без `v` workflow не запускает.
 
 ## Статус проекта
 
-`alpha.7.3` исправляет отображение диалогов, вывод адреса панели и выравнивание элементов управления. Перед beta нужно завершить длительные тесты нескольких нод, TCP/UDP, health-check, ротации токенов, обновления и восстановления после перезагрузки.
+`alpha.8` добавляет отдельный API-порт для нод, управление портами из web, новый мастер подключения, автоматический IP и uptime, упрощённые действия и статистику по нодам. Перед beta нужно завершить длительные тесты нескольких нод, TCP/UDP, health-check, обновления и восстановления после перезагрузки.
 
 Подробности: [`docs/ROADMAP.md`](docs/ROADMAP.md) и [`docs/TESTING.md`](docs/TESTING.md).
