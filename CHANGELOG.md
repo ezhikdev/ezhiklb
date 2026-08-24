@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0-alpha.7.1
+
+- Fixed all dialogs being positioned relative to the animated page container, which cropped node and listener editors.
+- Print the detected server IPv4 after network-access panel installation instead of `0.0.0.0` and a placeholder.
+
 ## 0.1.0-alpha.7
 
 - Simplified the public README to one interactive installation command and a focused two-VPS test flow.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-alpha.7"
+EZHIKLB_VERSION="0.1.0-alpha.7.1"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -20,6 +20,17 @@ backup_dir=""
 
 log() { printf '\n\033[1;36mEzhikLB\033[0m %s\n' "$*"; }
 die() { printf '\nEzhikLB installer error: %s\n' "$*" >&2; exit 1; }
+
+detect_server_ipv4() {
+  local detected=""
+  if command -v ip >/dev/null 2>&1; then
+    detected="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')"
+  fi
+  if [[ -z "$detected" ]] && command -v hostname >/dev/null 2>&1; then
+    detected="$(hostname -I 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $i !~ /^127\./){print $i;exit}}')"
+  fi
+  printf '%s' "$detected"
+}
 
 restore_previous_release() {
   [[ -n "$backup_dir" ]] || return 0
@@ -117,7 +128,7 @@ require_artifacts
 log "Installing system dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-packages=(ca-certificates curl openssl)
+packages=(ca-certificates curl openssl iproute2)
 if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
   packages+=(ipvsadm iptables iproute2 iputils-ping conntrack)
 fi
@@ -155,7 +166,7 @@ fi
 if [[ ! -f "$ENV_FILE" ]]; then
   admin_token="${EZHIKLB_ADMIN_TOKEN:-$(openssl rand -hex 32)}"
   agent_token="${EZHIKLB_AGENT_TOKEN:-$(openssl rand -hex 32)}"
-  ingress="${EZHIKLB_INGRESS_ADDRESS:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')}"
+  ingress="${EZHIKLB_INGRESS_ADDRESS:-$(detect_server_ipv4)}"
   panel_url="${EZHIKLB_PANEL_URL:-http://127.0.0.1:8080}"
   cat >"$ENV_FILE" <<EOF
 EZHIKLB_ROLE=${ROLE}
@@ -310,8 +321,16 @@ if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
     printf 'Local panel: http://127.0.0.1:8080\n'
     printf 'SSH tunnel: ssh -L 8080:127.0.0.1:8080 root@YOUR_SERVER\n'
   else
-    printf 'Panel listen address: http://0.0.0.0:8080\n'
-    printf 'Open in browser: http://YOUR_SERVER_IP:8080\n'
+    panel_ipv4="$(sed -n 's/^EZHIKLB_INGRESS_ADDRESS=//p' "$ENV_FILE")"
+    if [[ -z "$panel_ipv4" || "$panel_ipv4" == "0.0.0.0" || "$panel_ipv4" == "127.0.0.1" ]]; then
+      panel_ipv4="$(detect_server_ipv4)"
+    fi
+    if [[ -n "$panel_ipv4" ]]; then
+      printf 'Open in browser: http://%s:8080\n' "$panel_ipv4"
+      printf 'Node API: http://%s:8080\n' "$panel_ipv4"
+    else
+      printf 'IPv4 detection failed. Set EZHIKLB_INGRESS_ADDRESS in %s and restart the panel.\n' "$ENV_FILE"
+    fi
   fi
   printf 'Admin token: %s\n' "$(sed -n 's/^EZHIKLB_ADMIN_TOKEN=//p' "$ENV_FILE")"
 fi

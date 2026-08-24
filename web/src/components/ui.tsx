@@ -1,6 +1,7 @@
 import { Check, ChevronDown, X } from "lucide-react"
 import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react"
 import { useEffect, useId, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 
 export function Button({ className = "", variant = "primary", type = "button", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" | "danger" }) {
   return <button type={type} className={`button button--${variant} ${className}`} {...props} />
@@ -52,6 +53,8 @@ export function Dialog({ title, description, children, onClose, wide = false }: 
   const titleID = useId()
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
     ref.current?.focus()
     const key = (event: KeyboardEvent) => {
       const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')]
@@ -66,9 +69,9 @@ export function Dialog({ title, description, children, onClose, wide = false }: 
       }
     }
     window.addEventListener("keydown", key)
-    return () => { window.removeEventListener("keydown", key); previous?.focus() }
+    return () => { window.removeEventListener("keydown", key); document.body.style.overflow = previousOverflow; previous?.focus() }
   }, [])
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+  return createPortal(<div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby={titleID} className={`dialog ${wide ? "dialog--wide" : ""}`}>
       <div className="dialog__header">
         <div><h2 id={titleID}>{title}</h2>{description && <p>{description}</p>}</div>
@@ -76,7 +79,7 @@ export function Dialog({ title, description, children, onClose, wide = false }: 
       </div>
       {children}
     </div>
-  </div>
+  </div>, document.body)
 }
 
 export function EmptyState({ icon, title, description, action }: { icon: ReactNode; title: string; description: string; action?: ReactNode }) {
