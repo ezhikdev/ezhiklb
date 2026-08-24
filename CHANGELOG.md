@@ -2,6 +2,12 @@
 
 ## 0.1.0-alpha.7
 
+- Simplified the public README to one interactive installation command and a focused two-VPS test flow.
+- Added interactive panel access and node enrollment prompts to the installer.
+- Reduced new-node creation to a name-first two-step flow with automatic initial profile assignment.
+- Hardened the generated one-line node command with dependency installation and SHA-256 verification.
+- Added automatic `EZHIKLB_ALLOW_INSECURE=1` enrollment when the selected panel URL uses HTTP.
+- Marked alpha tags as GitHub pre-releases automatically.
 - Replaced the oversized Affinity panel with a compact custom dropdown and optional custom-seconds field.
 - Replaced native profile/scheduler selects with the shared EzhikLB dropdown component.
 - Replaced browser prompts for node editing and profile cloning with proper panel dialogs.

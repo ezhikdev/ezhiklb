@@ -33,7 +33,7 @@ func main() {
 	nodeID := env("EZHIKLB_NODE_ID", "local")
 	panelURL := strings.TrimRight(env("EZHIKLB_PANEL_URL", "http://127.0.0.1:8080"), "/")
 	if strings.HasPrefix(panelURL, "http://") && panelURL != "http://127.0.0.1:8080" && panelURL != "http://localhost:8080" && env("EZHIKLB_ALLOW_INSECURE", "0") != "1" {
-		logger.Error("remote panel URL must use HTTPS; set EZHIKLB_ALLOW_INSECURE=1 only on an isolated test environment", "panel_url", panelURL)
+		logger.Error("remote HTTP requires EZHIKLB_ALLOW_INSECURE=1; use HTTPS when the network is not trusted", "panel_url", panelURL)
 		os.Exit(1)
 	}
 	token := os.Getenv("EZHIKLB_AGENT_TOKEN")

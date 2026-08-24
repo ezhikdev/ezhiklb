@@ -57,19 +57,50 @@ choose_role() {
     ROLE="${ROLE:-panel-node}"
     return
   fi
-  printf '\nSelect installation role:\n'
-  printf '  1) Panel\n  2) Node (requires enrollment variables)\n  3) Panel + Node (recommended for alpha)\n'
-  read -r -p 'Role [3]: ' answer
-  case "${answer:-3}" in 1) ROLE="panel" ;; 2) ROLE="node" ;; 3) ROLE="panel-node" ;; *) die "invalid role" ;; esac
+  printf '\nВыберите вариант установки:\n'
+  printf '  1) Панель\n  2) Нода\n  3) Панель + локальная нода\n'
+  read -r -p 'Вариант [3]: ' answer
+  case "${answer:-3}" in 1) ROLE="panel" ;; 2) ROLE="node" ;; 3) ROLE="panel-node" ;; *) die "неверный вариант установки" ;; esac
 }
 
 choose_role
 case "$ROLE" in panel|node|panel-node) ;; *) die "EZHIKLB_ROLE must be panel, node, or panel-node" ;; esac
+
+panel_host="${EZHIKLB_HOST:-127.0.0.1}"
+if [[ -z "$EXISTING_VERSION" && ( "$ROLE" == "panel" || "$ROLE" == "panel-node" ) && -z "${EZHIKLB_HOST:-}" ]]; then
+  printf '\nКак открыть панель?\n'
+  printf '  1) Только на сервере и через SSH-туннель (127.0.0.1)\n'
+  printf '  2) По сети (0.0.0.0, необходимо для удалённых нод)\n'
+  read -r -p 'Доступ [1]: ' panel_access
+  case "${panel_access:-1}" in
+    1) panel_host="127.0.0.1" ;;
+    2) panel_host="0.0.0.0" ;;
+    *) die "неверный вариант доступа к панели" ;;
+  esac
+fi
+
 if [[ "$ROLE" == "node" ]]; then
-  [[ -n "${EZHIKLB_PANEL_URL:-}" ]] || die "node-only installation requires EZHIKLB_PANEL_URL"
-  agent_token_input="${EZHIKLB_AGENT_TOKEN:-}"
-  [[ ${#agent_token_input} -ge 24 ]] || die "node-only installation requires EZHIKLB_AGENT_TOKEN from the panel"
-  [[ -n "${EZHIKLB_NODE_ID:-}" ]] || die "node-only installation requires EZHIKLB_NODE_ID"
+  if [[ -z "${EZHIKLB_PANEL_URL:-}" ]]; then
+    read -r -p 'URL панели, доступный с этой ноды: ' EZHIKLB_PANEL_URL
+  fi
+  if [[ -z "${EZHIKLB_NODE_ID:-}" ]]; then
+    read -r -p 'ID ноды из панели: ' EZHIKLB_NODE_ID
+  fi
+  if [[ -z "${EZHIKLB_AGENT_TOKEN:-}" ]]; then
+    read -r -s -p 'Токен ноды из панели: ' EZHIKLB_AGENT_TOKEN
+    printf '\n'
+  fi
+  [[ -n "${EZHIKLB_PANEL_URL:-}" ]] || die "не указан URL панели"
+  [[ -n "${EZHIKLB_NODE_ID:-}" ]] || die "не указан ID ноды"
+  [[ ${#EZHIKLB_AGENT_TOKEN} -ge 24 ]] || die "токен ноды должен содержать не менее 24 символов"
+  if [[ "$EZHIKLB_PANEL_URL" == http://* && "$EZHIKLB_PANEL_URL" != "http://127.0.0.1:8080" && "$EZHIKLB_PANEL_URL" != "http://localhost:8080" && "${EZHIKLB_ALLOW_INSECURE:-0}" != "1" ]]; then
+    printf '\nВнимание: HTTP не шифрует токен и конфигурацию ноды.\n'
+    read -r -p 'Разрешить постоянное подключение по HTTP? [y/N]: ' allow_http
+    case "${allow_http:-n}" in
+      y|Y|yes|YES|д|Д|да|ДА) EZHIKLB_ALLOW_INSECURE=1 ;;
+      *) die "для HTTP требуется явное подтверждение" ;;
+    esac
+  fi
 fi
 
 require_artifacts() {
@@ -128,7 +159,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   panel_url="${EZHIKLB_PANEL_URL:-http://127.0.0.1:8080}"
   cat >"$ENV_FILE" <<EOF
 EZHIKLB_ROLE=${ROLE}
-EZHIKLB_HOST=127.0.0.1
+EZHIKLB_HOST=${panel_host}
 EZHIKLB_PORT=8080
 EZHIKLB_SECURE_COOKIE=0
 EZHIKLB_DATABASE=${DATA_DIR}/ezhiklb.db
@@ -274,8 +305,14 @@ fi
 log "${EZHIKLB_VERSION} installed successfully"
 printf 'Role: %s\n' "$ROLE"
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
-  printf 'Local panel: http://127.0.0.1:8080\n'
-  printf 'SSH tunnel: ssh -L 8080:127.0.0.1:8080 root@YOUR_SERVER\n'
+  installed_host="$(sed -n 's/^EZHIKLB_HOST=//p' "$ENV_FILE")"
+  if [[ "$installed_host" == "127.0.0.1" ]]; then
+    printf 'Local panel: http://127.0.0.1:8080\n'
+    printf 'SSH tunnel: ssh -L 8080:127.0.0.1:8080 root@YOUR_SERVER\n'
+  else
+    printf 'Panel listen address: http://0.0.0.0:8080\n'
+    printf 'Open in browser: http://YOUR_SERVER_IP:8080\n'
+  fi
   printf 'Admin token: %s\n' "$(sed -n 's/^EZHIKLB_ADMIN_TOKEN=//p' "$ENV_FILE")"
 fi
 printf 'Configuration: %s\n' "$ENV_FILE"

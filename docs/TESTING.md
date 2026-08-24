@@ -10,10 +10,12 @@ to GitHub and let the release workflow create the Linux bundle.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
-5. Open an SSH tunnel printed by the installer and use the generated token.
+5. Select local access for an SSH-only test or network access when a remote node must reach the panel.
+6. Open the address printed by the installer and use the generated token.
 
-The panel listens on loopback in this alpha. Do not expose plain HTTP directly
-to the internet. A later installer iteration will configure a domain and HTTPS.
+The installer can bind the panel to loopback or all network interfaces. HTTP is
+supported when the generated node command explicitly enables insecure mode;
+prefer HTTPS or a private network when credentials cross an untrusted network.
 
 ## Verify control plane
 
@@ -66,7 +68,7 @@ Installer backups are stored in `/var/backups/ezhiklb/<timestamp>`. The legacy
 `/etc/ezhik-udp/ezhik-udp.conf` file is never modified. If the first agent apply
 fails during migration, the installer stops the new agent and starts the old
 `ezhik-udp.service` again when it had been active before installation.
-## Alpha.6 acceptance checks
+## Alpha.7 acceptance checks
 
 Run these only on disposable test VPS nodes.
 
@@ -76,7 +78,8 @@ Run these only on disposable test VPS nodes.
 4. Add a second backend with equal weight and verify an approximate 50/50 distribution; change weights to 2/1 and verify an approximate 66/33 distribution over many independent clients/flows.
 5. Enable ICMP health-check, make one backend unreachable, wait for the configured failure threshold and verify its effective IPVS weight becomes zero. Restore it and verify recovery after the success threshold.
 6. Create a TCP-only rule and a TCP+UDP rule on unused ports; verify both protocols forward correctly.
-7. Create a remote node in the panel, copy its one-time command to a second disposable VPS, and verify version, last seen and applied/desired revisions appear in Nodes.
-8. Assign the same profile to both nodes, publish a change, and verify both converge to the same revision.
-9. Rotate the remote-node key and verify the old agent is rejected until its environment is updated.
-10. Clone a profile, inspect revision history, roll back an older revision and verify rollback creates a new revision instead of deleting history.
+7. Create a remote node by entering only its name, copy the generated one-line command to a second disposable VPS, and verify version, last seen and applied/desired revisions appear in Nodes.
+8. Repeat enrollment once over HTTP and verify the generated command includes `EZHIKLB_ALLOW_INSECURE=1`; repeat over HTTPS without that flag.
+9. Assign the same profile to both nodes, publish a change, and verify both converge to the same revision.
+10. Rotate the remote-node key and verify the old agent is rejected until its environment is updated.
+11. Clone a profile, inspect revision history, roll back an older revision and verify rollback creates a new revision instead of deleting history.
