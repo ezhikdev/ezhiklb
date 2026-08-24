@@ -84,10 +84,14 @@ h3 { font-size: 15px; }
 .select-menu__popover button[aria-selected="true"] > svg { color: var(--success); }
 .select-menu--compact .select-menu__trigger { min-height: 40px; }
 .select-menu--compact .select-menu__trigger small { display: none; }
-.switch { width: 46px; height: 26px; flex: 0 0 46px; display: block; border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px; background: #222428; line-height: 0; transition: background .2s ease, border-color .2s ease; }
-.switch span { display: block; width: 18px; height: 18px; border-radius: 50%; background: #85817b; transition: transform .2s ease, background .2s ease; }
-.switch--on { background: var(--accent); border-color: var(--accent); }
-.switch--on span { transform: translateX(20px); background: var(--accent-ink); }
+.switch { width: 44px; height: 44px; flex: 0 0 44px; display: grid; place-items: center; border: 0; border-radius: 10px; padding: 0; background: transparent; line-height: 0; }
+.switch span { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 8px; background: #1a1c1f; color: transparent; box-shadow: inset 0 0 0 1px rgba(255,255,255,.015); transition: background-color .2s ease, border-color .2s ease, box-shadow .2s ease, transform .16s ease; }
+.switch span svg { width: 17px; height: 17px; opacity: 0; transform: scale(.55) rotate(-10deg); stroke-width: 2.6; transition: opacity .16s ease, transform .2s ease; }
+.switch:hover span { border-color: rgba(231,227,220,.34); background: #202327; }
+.switch:active span { transform: scale(.9); }
+.switch--on span { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); box-shadow: 0 0 0 3px rgba(231,227,220,.08); }
+.switch--on:hover span { background: #fffdfa; }
+.switch--on span svg { opacity: 1; transform: scale(1) rotate(0); }
 
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 238px minmax(0, 1fr); }
 .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; padding: 22px 14px 16px; border-right: 1px solid var(--border); background: rgba(9,10,11,.76); backdrop-filter: blur(22px); }

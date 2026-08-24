@@ -59,4 +59,4 @@ Remote nodes support both HTTP and HTTPS. Plain HTTP requires the explicit
 `EZHIKLB_ALLOW_INSECURE=1` setting, which the panel adds to generated commands
 automatically for `http://` URLs. HTTPS is recommended across untrusted public
 networks. mTLS remains a future hardening layer and is not required for
-alpha.7.1 operation.
+alpha.7.2 operation.

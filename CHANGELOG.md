@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-alpha.7.2
+
+- Replaced unstable slider switches with accessible square checkboxes and animated SVG checkmarks across listeners, backends and health checks.
+
 ## 0.1.0-alpha.7.1
 
 - Fixed all dialogs being positioned relative to the animated page container, which cropped node and listener editors.
