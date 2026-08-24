@@ -1,44 +1,328 @@
-# EzhikLB
+# 🦔 Ezhik Torrent Guard
 
-EzhikLB is a lightweight Linux control plane and node agent for kernel-level
-TCP and UDP load balancing with IPVS.
-
-Alpha.6 supports both a single-host `Panel + Node` deployment and remote nodes
-that receive reusable profile revisions from one panel.
-
-## Alpha capabilities
-
-- Reusable configuration profiles assigned to nodes.
-- Immutable desired revisions and reported actual revisions.
-- TCP, UDP, or dual-protocol listeners.
-- Multiple backends with weighted round-robin.
-- Optional source affinity with documented 15-minute through 24-hour presets and a custom seconds value.
-- Global ICMP reachability checks with failure and recovery thresholds.
-- Incremental IPVS updates without clearing unrelated services.
-- React administration panel and JSON HTTP API.
-- Compact Cloudflare-style rule list with focused per-rule editing.
-- Inline conflict validation, cloning, weight percentages and unsaved-change protection.
-- Live per-service and per-backend IPVS packet, byte and connection counters.
-- Visible desired/applied state and backend ICMP status.
-- Installer roles: Panel, Node, Panel + Node, and Upgrade.
-- Per-node remote credentials, generated installation command and credential rotation.
-- Profile cloning, guarded deletion, immutable revision history and rollback.
-
-## Repository layout
+> Автоматическая защита Xray / Remnawave exit-нод от BitTorrent abuse.
 
 ```text
-cmd/ezhiklb          Panel, API and embedded web application
-cmd/ezhiklb-agent    Privileged local node agent
-internal/domain      Shared desired-state model and validation
-internal/store       SQLite persistence and immutable revisions
-internal/api         HTTP API and authentication
-internal/agent       IPVS, firewall and health reconciliation
-web                  React + TypeScript panel
-scripts              Installation and service templates
-docs                 Architecture and test-node instructions
+Developer : ezhikdev
+Telegram  : @ezhikdev
+GitHub    : https://github.com/ezhikdev
 ```
 
-## Development status
+Ezhik Torrent Guard пассивно обнаруживает BitTorrent-трафик на exit-сервере, связывает **реальный outbound socket Xray** с аутентифицированным пользователем Remnawave и временно отключает точную подписку через Remnawave API.
 
-This repository is an alpha. Do not deploy it on a production gateway before
-running the test-node checklist in `docs/TESTING.md`.
+## Как это работает
+
+```text
+Client → Xray / RemnaNode → Internet
+               │
+               └── passive AF_PACKET copy
+                           ↓
+                  Suricata + strict nDPI
+                           ↓
+                       exact socket
+                           ↓
+                     Torrent Guard
+                           ↓
+                    Remnawave API
+                           ↓
+              freeze → 15 min → unfreeze
+```
+
+По умолчанию санкция срабатывает на **первом exact strict-nDPI BitTorrent socket**, который удалось однозначно связать с authenticated client ID Xray.
+
+Guard **не банит source IP** и не использует общий IP ingress для определения пользователя.
+
+## Особенности v1.1.1
+
+- пассивный `AF_PACKET`, без inline/NFQUEUE;
+- не добавляет правила `iptables`;
+- outbound-only BPF-фильтр для уменьшения нагрузки;
+- Suricata 8.0.6 + nDPI 4.14;
+- strict BitTorrent heuristic для устранения известного ложного срабатывания на Roblox UDP;
+- точная корреляция `Xray request-id → authenticated client → real outbound socket → nDPI alert`;
+- freeze через Remnawave API и автоматический unfreeze;
+- длительность freeze настраивается при установке;
+- protected client IDs задаются при установке;
+- минимальное persistent state хранит только информацию, необходимую для последующего unfreeze;
+- raw connection metadata обрабатывается в RAM и автоматически очищается;
+- Suricata EVE и PCAP logging отключаются;
+- защита от накопления stale `tail` readers после restart Guard.
+
+> **Ограничение v1.1.1:** детектор настроен на IPv4. IPv6 — отдельная будущая задача.
+
+## Оптимизация runtime
+
+- reader отбрасывает ненужные Xray- и Suricata-строки до декодирования и очереди;
+- разбор timestamp кэширует epoch текущей секунды;
+- TTL-state удаляется через expiry queues без полного обхода всех живых socket ownership records;
+- nDPI включает только `NDPI_PROTOCOL_BITTORRENT`, который используется единственным Suricata-правилом.
+
+В `[STATS]` поля `filtered_info`, `filtered_access` и `dropped` показывают число строк, отфильтрованных до очереди, и событий, потерянных из-за переполнения очереди.
+
+## Требования
+
+Production-tested вариант рассчитан на:
+
+- Ubuntu 22.04 / 24.04;
+- x86_64 / amd64;
+- установленный и работающий Docker;
+- RemnaNode container (обычно `remnanode`);
+- Remnawave Panel API key;
+- Xray profile с RAM-only access/info logs.
+
+На Ubuntu 22.04 и 24.04 установщик скачивает готовый проверенный runtime из GitHub Release. Поэтому на сервере пользователя не запускается тяжёлая компиляция Suricata и nDPI. Для другой версии Ubuntu или при отсутствии подходящего release-asset автоматически используется сборка из исходников.
+
+Release-runtime собирается для универсального CPU baseline `x86-64`; host-specific `-march=native` принудительно отключён, поэтому пакет не зависит от модели процессора GitHub runner или пользовательского сервера.
+
+Режим локальной сборки можно выбрать переменной окружения:
+
+```bash
+EZHIK_BUILD_MODE=eco bash install.sh       # 1 job, минимальная нагрузка
+EZHIK_BUILD_MODE=balanced bash install.sh  # до 4 jobs, режим по умолчанию
+EZHIK_BUILD_MODE=fast bash install.sh      # все доступные CPU
+EZHIK_FORCE_SOURCE=1 bash install.sh       # принудительно собирать из исходников
+```
+
+## Обязательная настройка Xray
+
+В профиле Xray, используемом RemnaNode, нужны:
+
+```json
+"log": {
+  "access": "/dev/shm/xray-access.log",
+  "error": "/dev/shm/xray-info.log",
+  "loglevel": "info"
+}
+```
+
+Без `access` + `info` Guard не сможет построить exact attribution пользователя.
+
+Подробнее: [`docs/XRAY_LOGGING.md`](docs/XRAY_LOGGING.md).
+
+## Установка одной командой
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ezhikdev/ezhik-torrent-guard/main/install.sh | bash
+```
+
+Installer интерактивно спросит:
+
+1. домен или URL Remnawave Panel;
+2. API key — ввод скрытый;
+3. protected numeric client IDs, если нужны;
+4. длительность freeze (по умолчанию 15 минут);
+5. запускать сразу в `LIVE` или оставить `DRY RUN`.
+
+Пример:
+
+```text
+============================================================
+                   EZHIK TORRENT GUARD
+============================================================
+
+ Torrent protection for Xray + Remnawave
+
+ Developer : ezhikdev
+ Telegram  : @ezhikdev
+ GitHub    : https://github.com/ezhikdev
+
+============================================================
+
+Remnawave panel domain or URL: panel.example.com
+Remnawave API key: ********
+Protected Remnawave client IDs, comma-separated (optional):
+Freeze duration in minutes [15]:
+Enable LIVE Remnawave enforcement after install? [Y/n]:
+```
+
+Installer сам определяет WAN interface и WAN IPv4. IP-адрес конкретного сервера в исходниках не зашит.
+
+При повторном запуске installer сравнивает установленный `/opt/ezhik-torrent-guard/VERSION` с `VERSION` репозитория:
+
+- более старая версия — предлагает обновление с сохранением текущих настроек;
+- та же версия — сообщает, что установлена последняя версия, и предлагает repair/reconfigure;
+- более новая версия — отказывается выполнять неявный downgrade.
+
+## Сборка готовых runtime-пакетов
+
+Workflow `.github/workflows/runtime-release.yml` собирает отдельные пакеты на официальных GitHub runners Ubuntu 22.04 и 24.04 с ограничением в два build jobs. Собственный сервер для сборки не нужен.
+
+Для теста откройте в GitHub вкладку **Actions**, выберите **Build runtime and release** и нажмите **Run workflow**. Будут выполнены две сборки и две проверки; результат останется временным Actions Artifact и не будет опубликован.
+
+Для публикации:
+
+```bash
+git tag v1.1.1
+git push origin v1.1.1
+```
+
+Значение тега должно точно соответствовать корневому `VERSION` с префиксом `v`. После успешных build/verify jobs workflow создаст GitHub Release и приложит оба runtime-пакета, SHA-256 и manifests. Для следующего релиза сначала измените `VERSION`, например на `1.0.3`, затем создайте тег `v1.0.3`.
+
+## Что устанавливается
+
+```text
+/opt/ezhik-torrent-guard/
+/etc/ezhik-torrent-guard/
+/var/lib/ezhik-torrent-guard/
+/opt/ezhik-suricata-8.0.6/
+
+/etc/systemd/system/ezhik-suricata.service
+/etc/systemd/system/ezhik-torrent-guard.service
+/etc/systemd/system/ezhik-ram-log-guard.service
+```
+
+API credentials сохраняются локально в:
+
+```text
+/etc/ezhik-torrent-guard/api.env
+```
+
+с правами `0600`. Они не входят в репозиторий. Runtime-настройки находятся отдельно в `settings.env`, поэтому API token не требуется передавать через systemd EnvironmentFile.
+
+## Проверка работы
+
+```bash
+systemctl status ezhik-suricata
+systemctl status ezhik-torrent-guard
+systemctl status ezhik-ram-log-guard
+```
+
+Live log Guard:
+
+```bash
+journalctl -fu ezhik-torrent-guard
+```
+
+При exact detection:
+
+```text
+[BT EXACT] client=12345 sockets=1 ...
+[ACTION QUEUED] client=12345 action=freeze
+[FROZEN] client=12345 duration=15m ...
+```
+
+После истечения срока:
+
+```text
+[UNFROZEN] client=12345 status=ACTIVE
+```
+
+В `DRY RUN` вместо API action:
+
+```text
+[WOULD_FREEZE] client=12345 ...
+```
+
+## Protected clients
+
+Во время установки можно указать client IDs, которые Guard **никогда не будет отключать**:
+
+```text
+123,456,789
+```
+
+Значения универсальные — никакой конкретный admin ID в public repository не зашит.
+
+## Admin hold
+
+Чтобы временно запретить автоматический unfreeze конкретного client ID:
+
+```bash
+echo 12345 >> /etc/ezhik-torrent-guard/hold.txt
+```
+
+Guard не будет force-enable пользователя из hold-файла.
+
+## Privacy
+
+Raw connection metadata требуется для кратковременной exact correlation, но проект рассчитан на обработку этих данных **в RAM**:
+
+```text
+Xray access    → container /dev/shm/xray-access.log
+Xray info      → container /dev/shm/xray-info.log
+Suricata fast  → host /dev/shm/ezhik-suricata-fast.log
+EVE            → disabled
+PCAP logging   → disabled
+```
+
+На диск сохраняется только минимальное sanction state, необходимое для безопасного автоматического unfreeze после restart:
+
+```text
+client_id
+uuid
+disabled_at
+unfreeze_at
+next_retry_at
+reason
+```
+
+История peer IP / remote ports / visited domains в sanction state не сохраняется.
+
+## Безопасность действий Remnawave
+
+Перед freeze Guard:
+
+- resolve numeric client ID → Remnawave UUID;
+- проверяет совпадение client ID;
+- требует текущий `ACTIVE` status;
+- только после успешного `disable` создаёт локальную sanction.
+
+Перед unfreeze Guard повторно проверяет UUID и status. Если подписка была отключена не Guard'ом или состояние изменилось вручную, Guard не должен слепо force-enable пользователя.
+
+## Удаление
+
+Скачать и запустить uninstaller:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ezhikdev/ezhik-torrent-guard/main/uninstall.sh | bash
+```
+
+По умолчанию конфиг и sanction state сохраняются.
+
+Полное удаление:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ezhikdev/ezhik-torrent-guard/main/uninstall.sh -o /tmp/ezhik-tg-uninstall.sh
+bash /tmp/ezhik-tg-uninstall.sh --purge
+```
+
+Uninstaller откажется останавливаться при активной локальной sanction, чтобы случайно не оставить подписку замороженной навсегда. `--force` существует только для осознанного ручного восстановления.
+
+## Структура репозитория
+
+```text
+ezhik-torrent-guard/
+├── install.sh
+├── uninstall.sh
+├── README.md
+├── VERSION
+├── RUNTIME.env
+├── .github/
+│   └── workflows/
+│       └── runtime-release.yml
+├── src/
+│   ├── guard.py
+│   └── remnawave_actions.py
+├── suricata/
+│   └── ezhik-torrent-only.rules
+├── scripts/
+│   ├── ezhik-ram-log-guard.sh
+│   ├── ezhik-torrent-guard-cleanup.sh
+│   ├── build-runtime.sh
+│   ├── create-release-manifest.py
+│   ├── patch_ndpi_strict.py
+│   ├── patch_suricata_ndpi.py
+│   ├── render_suricata_config.py
+│   └── verify-runtime.py
+├── systemd/
+│   ├── ezhik-suricata.service.template
+│   ├── ezhik-torrent-guard.service
+│   ├── ezhik-torrent-guard-cleanup.conf
+│   └── ezhik-ram-log-guard.service
+└── docs/
+    └── XRAY_LOGGING.md
+```
+
+## Disclaimer
+
+Torrent/DPI detection не может гарантировать распознавание абсолютно каждого клиента, будущей обфускации или каждого варианта протокола. Перед массовым rollout рекомендуется сначала поставить новую версию на одну exit-ноду и проверить `DRY RUN` на своей тестовой подписке.
