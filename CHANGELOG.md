@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0-alpha.7.3
+
+- Centered the animated checkmark precisely inside every square state control.
+- Replaced manual backend action offsets with stable vertical grid alignment.
+
 ## 0.1.0-alpha.7.2
 
 - Replaced unstable slider switches with accessible square checkboxes and animated SVG checkmarks across listeners, backends and health checks.
