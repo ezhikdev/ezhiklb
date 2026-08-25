@@ -42,3 +42,11 @@ Beta.1 adds lightweight node telemetry, acknowledged decommission and panel-inde
 4. Node disable/re-enable, deletion, port migration and profile rollback tested end to end.
 5. Reboot recovery tested for the panel and every node.
 6. Backup/restore rehearsal completed before using a primary server.
+
+## Beta.2 — autonomous nodes and operator history
+
+1. Restore the last successfully applied IPVS/firewall state before contacting the panel after an agent or VPS restart.
+2. Replace internal revision counters in the UI with clear application states and profile version labels.
+3. Support automatic `v1`, `v2`, `v3` profile versions and validated operator-defined versions.
+4. Add a filterable event journal with a strict 14-day retention window.
+5. Complete the node-metric alignment pass and add a permanent project link to the sidebar.

@@ -78,6 +78,7 @@ func (s *Server) PanelHandler() http.Handler {
 	mux.Handle("POST /api/v1/nodes/{id}/health-probe", s.admin(http.HandlerFunc(s.requestHealthProbe)))
 	mux.Handle("GET /api/v1/health", s.admin(http.HandlerFunc(s.listHealth)))
 	mux.Handle("GET /api/v1/stats", s.admin(http.HandlerFunc(s.listStats)))
+	mux.Handle("GET /api/v1/events", s.admin(http.HandlerFunc(s.listEvents)))
 	mux.Handle("PUT /api/v1/nodes/{id}/profile", s.admin(http.HandlerFunc(s.assignProfile)))
 	mux.Handle("GET /api/v1/settings", s.admin(http.HandlerFunc(s.getSettings)))
 	mux.Handle("PUT /api/v1/settings", s.admin(http.HandlerFunc(s.updateSettings)))
@@ -163,7 +164,15 @@ func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
 type profilePayload struct {
 	Name        string               `json:"name"`
 	Description string               `json:"description"`
+	AutoVersion *bool                `json:"auto_version"`
+	Version     string               `json:"version"`
 	Config      domain.ProfileConfig `json:"config"`
+}
+
+func (p profilePayload) versioning() (bool, string) {
+	auto := true
+	if p.AutoVersion != nil { auto = *p.AutoVersion }
+	return auto, strings.TrimSpace(p.Version)
 }
 
 func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +185,8 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Profile name is required")
 		return
 	}
-	profile, revision, err := s.store.CreateProfile(r.Context(), strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description), payload.Config)
+	autoVersion, version := payload.versioning()
+	profile, revision, err := s.store.CreateProfile(r.Context(), strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description), payload.Config, autoVersion, version)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
 		return
@@ -207,7 +217,8 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Profile name is required")
 		return
 	}
-	profile, revision, err := s.store.PublishRevision(r.Context(), r.PathValue("id"), strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description), payload.Config)
+	autoVersion, version := payload.versioning()
+	profile, revision, err := s.store.PublishRevision(r.Context(), r.PathValue("id"), strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description), payload.Config, autoVersion, version)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
 		return
@@ -258,6 +269,12 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, nodes)
+}
+
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListAudit(r.Context(), r.URL.Query().Get("filter"), 200)
+	if err != nil { s.internalError(w, err); return }
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
@@ -541,6 +558,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-beta.1"
+const Version = "0.1.0-beta.2"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

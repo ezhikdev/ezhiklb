@@ -131,6 +131,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	return r.saveState(AppliedState{Revision: desired.Revision, Services: services})
 }
 
+// Restore rebuilds the last committed data-plane state without contacting the
+// panel. This keeps forwarding available after a VPS reboot during a control
+// plane outage.
+func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, err := r.loadState()
+	if err != nil { return 0, err }
+	if len(state.Services) == 0 { return state.Revision, nil }
+	if err := r.validateLocalAddresses(ctx, state.Services); err != nil { return 0, err }
+	if err := r.configureKernel(ctx); err != nil { return 0, err }
+	if err := r.applyFirewall(ctx, state.Services); err != nil { return 0, fmt.Errorf("restore firewall: %w", err) }
+	for _, service := range state.Services {
+		if err := r.ensureService(ctx, service, true); err != nil { return 0, fmt.Errorf("restore IPVS service: %w", err) }
+		for _, destination := range service.Destinations {
+			if err := r.ensureDestination(ctx, service, destination, true); err != nil { return 0, fmt.Errorf("restore IPVS destination: %w", err) }
+		}
+	}
+	return state.Revision, nil
+}
+
 // Decommission removes only services and firewall rules managed by EzhikLB.
 // Unrelated IPVS services and host firewall rules remain untouched.
 func (r *Reconciler) Decommission(ctx context.Context) error {

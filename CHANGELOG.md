@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-beta.2
+
+- Added autonomous restoration of the last successfully applied IPVS and firewall state when a node boots while the panel is unavailable.
+- Added automatic `v1`, `v2`, `v3` profile versions and validated custom versions with immutable publication history.
+- Replaced internal revision counters in the node interface with clear apply status and semantic profile version labels.
+- Added an event journal with node, profile and error filters and automatic 14-day retention.
+- Added the project GitHub link to the sidebar and aligned compact load metrics with the rest of each node row.
+
 ## 0.1.0-beta.1
 
 - Added lightweight one-minute node telemetry for RAM, CPU, load average, network throughput and unique active client IPs.

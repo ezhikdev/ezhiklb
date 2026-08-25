@@ -1,4 +1,4 @@
-import type { BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "../types"
+import type { AuditEvent, BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "../types"
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -26,10 +26,10 @@ export const api = {
   status: () => request<Status>("/api/v1/status"),
   profiles: () => request<Profile[]>("/api/v1/profiles"),
   profile: (id: string) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`),
-  createProfile: (name: string, description: string, config: ProfileConfig) =>
-    request<{ profile: Profile; revision: Revision }>("/api/v1/profiles", { method: "POST", body: JSON.stringify({ name, description, config }) }),
-  publishProfile: (id: string, name: string, description: string, config: ProfileConfig) =>
-    request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`, { method: "PUT", body: JSON.stringify({ name, description, config }) }),
+  createProfile: (name: string, description: string, config: ProfileConfig, autoVersion = true, version = "") =>
+    request<{ profile: Profile; revision: Revision }>("/api/v1/profiles", { method: "POST", body: JSON.stringify({ name, description, config, auto_version: autoVersion, version }) }),
+  publishProfile: (id: string, name: string, description: string, config: ProfileConfig, autoVersion = true, version = "") =>
+    request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`, { method: "PUT", body: JSON.stringify({ name, description, config, auto_version: autoVersion, version }) }),
   revisions: (id: string) => request<Revision[]>(`/api/v1/profiles/${id}/revisions`),
   rollbackProfile: (id: string, number: number) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}/rollback/${number}`, { method: "POST" }),
   cloneProfile: (id: string, name: string) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
@@ -42,6 +42,7 @@ export const api = {
   requestHealthProbe: (id: string) => request<{ health_probe: number }>(`/api/v1/nodes/${id}/health-probe`, { method: "POST" }),
   health: () => request<BackendHealth[]>("/api/v1/health"),
   stats: () => request<ServiceStat[]>("/api/v1/stats"),
+  events: (filter = "all") => request<AuditEvent[]>(`/api/v1/events?filter=${encodeURIComponent(filter)}`),
   settings: () => request<SystemSettings>("/api/v1/settings"),
   updateSettings: (settings: SystemSettings) => request<{ settings: SystemSettings; restarting: boolean }>("/api/v1/settings", { method: "PUT", body: JSON.stringify(settings) }),
   assignProfile: (nodeID: string, profileID: string) => request<void>(`/api/v1/nodes/${nodeID}/profile`, { method: "PUT", body: JSON.stringify({ profile_id: profileID }) }),

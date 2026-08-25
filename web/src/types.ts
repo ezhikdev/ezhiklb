@@ -39,6 +39,8 @@ export interface Profile {
   name: string
   description: string
   current_revision: number
+  auto_version: boolean
+  version: string
   created_at: string
   updated_at: string
 }
@@ -47,7 +49,17 @@ export interface Revision {
   id: number
   profile_id: string
   number: number
+  version: string
   config: ProfileConfig
+  created_at: string
+}
+
+export interface AuditEvent {
+  id: number
+  action: string
+  target_type: string
+  target_id: string
+  details: string
   created_at: string
 }
 

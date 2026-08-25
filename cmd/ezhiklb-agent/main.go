@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-beta.1"
+const version = "0.1.0-beta.2"
 
 type client struct {
 	baseURL string
@@ -54,10 +54,12 @@ func main() {
 	heartbeatPoll := time.NewTicker(15 * time.Second)
 	defer desiredPoll.Stop()
 	defer heartbeatPoll.Stop()
-	var applied int64
+	applied, restoreErr := reconciler.Restore(ctx)
+	if restoreErr != nil { logger.Error("restore last applied state", "error", restoreErr) } else if applied > 0 { logger.Info("restored last applied state", "revision", applied) }
 	var lastHealthProbe int64
 	var applyError string
 	applyState := "connecting"
+	if applied > 0 && restoreErr == nil { applyState = "applied" }
 	var healthCancel context.CancelFunc
 	var healthMu sync.Mutex
 	var metrics domain.NodeMetrics
@@ -76,7 +78,9 @@ func main() {
 		return true
 	}
 	reconcile := func() bool {
-		desired, changed, err := api.desired(ctx, nodeID, applied, lastHealthProbe)
+		knownRevision := applied
+		if healthCancel == nil && applied > 0 { knownRevision = 0 }
+		desired, changed, err := api.desired(ctx, nodeID, knownRevision, lastHealthProbe)
 		if err != nil {
 			logger.Error("fetch desired state", "error", err)
 			return false
@@ -118,6 +122,17 @@ func main() {
 				go monitor.Run(healthCtx, desired.Config.HealthCheck, reconciler.Services)
 				return true
 			}
+		}
+		if desired.Revision == applied && healthCancel == nil {
+			healthMu.Lock()
+			healthCtx, stopHealth := context.WithCancel(ctx)
+			healthCancel = stopHealth
+			healthMu.Unlock()
+			monitor.Reset()
+			go monitor.Run(healthCtx, desired.Config.HealthCheck, reconciler.Services)
+			applyError = ""
+			applyState = "applied"
+			return true
 		}
 		if probeRequested && desired.Revision == applied {
 			monitor.CheckNow(ctx, desired.Config.HealthCheck, reconciler.Services())

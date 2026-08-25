@@ -67,6 +67,8 @@ type Profile struct {
 	Name            string    `json:"name"`
 	Description     string    `json:"description"`
 	CurrentRevision int64     `json:"current_revision"`
+	AutoVersion     bool      `json:"auto_version"`
+	Version         string    `json:"version"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -75,6 +77,7 @@ type Revision struct {
 	ID        int64         `json:"id"`
 	ProfileID string        `json:"profile_id"`
 	Number    int64         `json:"number"`
+	Version   string        `json:"version"`
 	Config    ProfileConfig `json:"config"`
 	CreatedAt time.Time     `json:"created_at"`
 }
@@ -114,6 +117,15 @@ type SystemSettings struct {
 	AgentPort       int `json:"agent_port"`
 	LegacyPanelPort int `json:"legacy_panel_port,omitempty"`
 	LegacyAgentPort int `json:"legacy_agent_port,omitempty"`
+}
+
+type AuditEvent struct {
+	ID         int64     `json:"id"`
+	Action     string    `json:"action"`
+	TargetType string    `json:"target_type"`
+	TargetID   string    `json:"target_id"`
+	Details    string    `json:"details"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type NodeDesiredState struct {

@@ -87,3 +87,11 @@ Remote-node removal is acknowledged. The panel first marks the node as
 `deleting`; after reconnecting, the agent removes only EzhikLB-managed IPVS
 services and firewall chains, reports completion, disables its systemd unit and
 exits. The credential and node row are removed only after this acknowledgement.
+
+## Autonomous restore and profile versions
+
+The node agent stores only its last successfully applied desired state. At startup it restores the corresponding IPVS services, destinations and managed firewall rules before attempting control-plane reconciliation. A panel outage therefore prevents new configuration from arriving but does not intentionally remove or pause the last known data plane.
+
+SQLite keeps an internal monotonic revision number for reconciliation while operators see a separate immutable profile version label. Automatic mode derives `vN` from the next revision; manual mode accepts only ASCII letters, digits, dots and hyphens and requires a new label for every publication.
+
+Audit events are operational history rather than telemetry. They are pruned to a rolling 14-day window during writes and reads; node resource metrics continue to store only the latest aggregate.

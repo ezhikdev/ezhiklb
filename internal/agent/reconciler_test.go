@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,6 +24,9 @@ func (f *fakeRunner) Run(_ context.Context, name string, args []string, input st
 	}
 	if name == "ip" && strings.Join(args, " ") == "-4 route get 1.1.1.1" {
 		return "1.1.1.1 via 198.51.100.1 dev eth0 src 198.51.100.10", nil
+	}
+	if name == "ip" && strings.Join(args, " ") == "-o -4 addr show" {
+		return "2: eth0 inet 198.51.100.10/24 scope global eth0", nil
 	}
 	return "", nil
 }
@@ -58,3 +62,21 @@ func TestApplyIPVSNeverClearsGlobalTable(t *testing.T) {
 	}
 }
 
+func TestRestoreRebuildsSavedDataPlane(t *testing.T) {
+	runner := &fakeRunner{}
+	r := NewReconciler(runner, filepath.Join(t.TempDir(), "state.json"), nil)
+	service := Service{Protocol: domain.ProtocolUDP, Address: "198.51.100.10", Port: 8002, Scheduler: "wrr", AffinitySecs: 10800, Destinations: []Destination{{ID: "backend", Address: "192.0.2.10", Port: 9000, Weight: 2}}}
+	if err := r.saveState(AppliedState{Revision: 7, Services: []Service{service}}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := r.Restore(context.Background())
+	if err != nil { t.Fatal(err) }
+	if revision != 7 { t.Fatalf("revision = %d, want 7", revision) }
+	var serviceRestored, destinationRestored bool
+	for _, call := range runner.calls {
+		joined := strings.Join(call.args, " ")
+		if call.name == "ipvsadm" && strings.Contains(joined, "-E -u 198.51.100.10:8002") { serviceRestored = true }
+		if call.name == "ipvsadm" && strings.Contains(joined, "-e -u 198.51.100.10:8002 -r 192.0.2.10:9000") { destinationRestored = true }
+	}
+	if !serviceRestored || !destinationRestored { t.Fatalf("saved IPVS state was not restored: %#v", runner.calls) }
+}
