@@ -95,3 +95,20 @@ The node agent stores only its last successfully applied desired state. At start
 SQLite keeps an internal monotonic revision number for reconciliation while operators see a separate immutable profile version label. Automatic mode derives `vN` from the next revision; manual mode accepts only ASCII letters, digits, dots and hyphens and requires a new label for every publication.
 
 Audit events are operational history rather than telemetry. They are pruned to a rolling 14-day window during writes and reads; node resource metrics continue to store only the latest aggregate.
+
+## Node self-update and diagnostics
+
+Beta.3 adds a one-minute node-metric history (`node_metric_history`, pruned to a rolling 24-hour
+window) that backs the Overview charts, and a read-only diagnostics probe
+(`agent.CollectDiagnostics`) reporting whether `ipvsadm` responds and whether the
+`EZHIKLB-FORWARD`/`EZHIKLB-SNAT` chains exist, alongside current service/destination counts.
+
+Node self-update keeps the existing security boundary intact: the panel never sends a shell
+command, only a target version string (`NodeDesiredState.UpdateVersion`, taken from the panel's
+own build version). The agent is solely responsible for turning that into an update: it fetches
+the matching official `ezhiklb_<version>_linux_amd64.tar.gz` release asset and its `.sha256`
+file from GitHub Releases, verifies the checksum before touching anything on disk, extracts only
+the `ezhiklb-agent` binary, and atomically renames it over the running executable before asking
+systemd to restart the service. A failed download, checksum mismatch or extraction error leaves
+the running binary untouched and is reported back as `update_state=error` with the failure
+reason, never partially applied.

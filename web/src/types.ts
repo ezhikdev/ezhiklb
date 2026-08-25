@@ -78,6 +78,19 @@ export interface NodeInfo {
   online_since?: string
   last_error?: string
   metrics?: NodeMetrics
+  diagnostics?: NodeDiagnostics
+  update_target?: string
+  update_state?: "idle" | "requested" | "updating" | "completed" | "error"
+  update_error?: string
+}
+
+export interface NodeDiagnostics {
+  ipvs_available: boolean
+  firewall_ready: boolean
+  service_count: number
+  destination_count: number
+  error?: string
+  checked_at: string
 }
 
 export interface NodeMetrics {
@@ -85,6 +98,17 @@ export interface NodeMetrics {
   cpu_used_percent: number
   load_1: number
   cpu_cores: number
+  network_rx_bps: number
+  network_tx_bps: number
+  active_ips: number
+  collected_at: string
+}
+
+export interface NodeMetricPoint {
+  node_id: string
+  ram_used_percent: number
+  cpu_used_percent: number
+  load_1: number
   network_rx_bps: number
   network_tx_bps: number
   active_ips: number

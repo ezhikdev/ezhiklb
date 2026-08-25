@@ -58,8 +58,9 @@ type Destination struct {
 }
 
 type AppliedState struct {
-	Revision int64     `json:"revision"`
-	Services []Service `json:"services"`
+	Revision    int64              `json:"revision"`
+	Services    []Service          `json:"services"`
+	HealthCheck domain.HealthCheck `json:"health_check"`
 }
 
 type Reconciler struct {
@@ -103,6 +104,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if err := r.validateLocalAddresses(ctx, services); err != nil {
 		return err
 	}
+	if err := r.validatePortAvailability(ctx, services); err != nil { return err }
 	old, err := r.loadState()
 	if err != nil {
 		return err
@@ -128,7 +130,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if err := r.applyFirewall(ctx, services); err != nil {
 		return fmt.Errorf("finalize firewall: %w", err)
 	}
-	return r.saveState(AppliedState{Revision: desired.Revision, Services: services})
+	return r.saveState(AppliedState{Revision: desired.Revision, Services: services, HealthCheck: desired.Config.HealthCheck})
+}
+
+func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Service) error {
+	output, err := r.runner.Run(ctx, "ss", []string{"-H", "-lntup"}, "")
+	if err != nil { return fmt.Errorf("inspect occupied ports: %w", err) }
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line); if len(fields) < 5 { continue }
+		protocol := strings.ToLower(fields[0]); endpoint := fields[4]
+		for _, service := range services {
+			if protocol == string(service.Protocol) && strings.HasSuffix(endpoint, ":"+strconv.Itoa(int(service.Port))) {
+				return fmt.Errorf("port conflict: %s %s:%d is occupied by %s", strings.ToUpper(protocol), service.Address, service.Port, strings.TrimSpace(line))
+			}
+		}
+	}
+	return nil
 }
 
 // Restore rebuilds the last committed data-plane state without contacting the
@@ -150,6 +167,14 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 		}
 	}
 	return state.Revision, nil
+}
+
+func (r *Reconciler) RestoredHealthCheck() domain.HealthCheck {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, err := r.loadState()
+	if err != nil { return domain.HealthCheck{} }
+	return state.HealthCheck
 }
 
 // Decommission removes only services and firewall rules managed by EzhikLB.

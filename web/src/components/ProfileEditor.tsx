@@ -1,7 +1,7 @@
 import { ArrowRight, Copy, Pencil, Plus, Server, Trash2 } from "lucide-react"
 import { useMemo, useState } from "react"
 import type { Backend, BackendHealth, Listener, ProfileConfig, Protocol } from "../types"
-import { Badge, Button, Card, Dialog, Field, Input, SelectMenu, Switch } from "./ui"
+import { Badge, Button, Card, ConfirmDialog, Dialog, Field, Input, SelectMenu, Switch } from "./ui"
 
 const makeID = (prefix: string) => {
   const bytes = new Uint8Array(8)
@@ -53,9 +53,10 @@ function validateListener(listener: Listener, others: Listener[]): ListenerError
   return errors
 }
 
-export function ProfileEditor({ initial, health, onChange }: { initial: ProfileConfig; health?: BackendHealth[]; onChange: (config: ProfileConfig) => void }) {
+export function ProfileEditor({ initial, health, nodeAddresses, onChange }: { initial: ProfileConfig; health?: BackendHealth[]; nodeAddresses?: string[]; onChange: (config: ProfileConfig) => void }) {
   const [config, setConfig] = useState<ProfileConfig>(() => structuredClone(initial))
   const [editing, setEditing] = useState<{ listener: Listener; index: number | null } | null>(null)
+  const [removing, setRemoving] = useState<number | null>(null)
   const update = (next: ProfileConfig) => { setConfig(next); onChange(next) }
   const patchHealth = (values: Partial<ProfileConfig["health_check"]>) => update({ ...config, health_check: { ...config.health_check, ...values } })
   const totalBackends = useMemo(() => config.listeners.reduce((sum, listener) => sum + listener.backends.length, 0), [config.listeners])
@@ -75,10 +76,7 @@ export function ProfileEditor({ initial, health, onChange }: { initial: ProfileC
     clone.backends = clone.backends.map((backend) => ({ ...backend, id: makeID("bck") }))
     setEditing({ listener: clone, index: null })
   }
-  const removeListener = (index: number) => {
-    if (!window.confirm(`Удалить запись «${config.listeners[index].name}»?`)) return
-    update({ ...config, listeners: config.listeners.filter((_, item) => item !== index) })
-  }
+  const removeListener = (index: number) => { update({ ...config, listeners: config.listeners.filter((_, item) => item !== index) }); setRemoving(null) }
 
   return <div className="editor-stack">
     <Card className="settings-card">
@@ -104,9 +102,10 @@ export function ProfileEditor({ initial, health, onChange }: { initial: ProfileC
       : <div className="rule-list">{config.listeners.map((listener, index) => <RuleRow key={listener.id} listener={listener}
           onToggle={(enabled) => update({ ...config, listeners: config.listeners.map((item, itemIndex) => itemIndex === index ? { ...item, enabled } : item) })}
           onEdit={() => setEditing({ listener: structuredClone(listener), index })}
-          onClone={() => cloneListener(listener)} onRemove={() => removeListener(index)} />)}</div>}
+          onClone={() => cloneListener(listener)} onRemove={() => setRemoving(index)} />)}</div>}
 
-    {editing && <ListenerDialog initial={editing.listener} others={config.listeners.filter((_, index) => index !== editing.index)} health={health ?? []} onSave={saveListener} onClose={() => setEditing(null)} />}
+    {editing && <ListenerDialog initial={editing.listener} others={config.listeners.filter((_, index) => index !== editing.index)} health={health ?? []} nodeAddresses={nodeAddresses ?? []} onSave={saveListener} onClose={() => setEditing(null)} />}
+    {removing != null && <ConfirmDialog title="Удалить запись?" description={`Запись «${config.listeners[removing].name}» будет удалена из профиля.`} confirmLabel="Удалить запись" danger onCancel={() => setRemoving(null)} onConfirm={() => removeListener(removing)} />}
   </div>
 }
 
@@ -128,11 +127,12 @@ function RuleRow({ listener, onToggle, onEdit, onClone, onRemove }: { listener: 
   </Card>
 }
 
-function ListenerDialog({ initial, others, health, onSave, onClose }: { initial: Listener; others: Listener[]; health: BackendHealth[]; onSave: (listener: Listener) => void; onClose: () => void }) {
+function ListenerDialog({ initial, others, health, nodeAddresses, onSave, onClose }: { initial: Listener; others: Listener[]; health: BackendHealth[]; nodeAddresses: string[]; onSave: (listener: Listener) => void; onClose: () => void }) {
   const [listener, setListener] = useState(initial)
   const [errors, setErrors] = useState<ListenerErrors>({})
+  const [confirmClose, setConfirmClose] = useState(false)
   const dirty = JSON.stringify(listener) !== JSON.stringify(initial)
-  const close = () => { if (!dirty || window.confirm("Закрыть редактор и потерять несохранённые изменения?")) onClose() }
+  const close = () => { if (!dirty) { onClose(); return } setConfirmClose(true) }
   const patch = (values: Partial<Listener>) => setListener((current) => ({ ...current, ...values }))
   const toggleProtocol = (protocol: Protocol) => patch({ protocols: listener.protocols.includes(protocol) ? listener.protocols.filter((item) => item !== protocol) : [...listener.protocols, protocol] })
   const patchBackend = (index: number, values: Partial<Backend>) => patch({ backends: listener.backends.map((backend, item) => item === index ? { ...backend, ...values } : backend) })
@@ -169,7 +169,7 @@ function ListenerDialog({ initial, others, health, onSave, onClose }: { initial:
         const backendHealth = health.find((item) => item.address === backend.address)
         return <Card className="backend-editor" key={backend.id}>
           <div className="backend-toggle-cell"><span>Состояние</span><Switch label={`Включить ${backend.address || "backend"}`} checked={backend.enabled} onChange={(enabled) => patchBackend(index, { enabled })} /></div>
-          <Field label="IP-адрес" error={errors[`backend.${index}.address`]}><Input className="input mono" placeholder="1.1.1.1" value={backend.address} aria-invalid={Boolean(errors[`backend.${index}.address`])} onChange={(e) => patchBackend(index, { address: e.target.value })} /></Field>
+          <Field label="IP-адрес" error={errors[`backend.${index}.address`]}><Input className="input mono" placeholder="1.1.1.1" value={backend.address} aria-invalid={Boolean(errors[`backend.${index}.address`])} onChange={(e) => patchBackend(index, { address: e.target.value })} />{!errors[`backend.${index}.address`] && backend.address && nodeAddresses.includes(backend.address) && <span className="field-warning">Совпадает с IP ноды — трафик пойдёт сам на себя</span>}</Field>
           <Field label="Порт" error={errors[`backend.${index}.port`]}><Input type="number" min={1} max={65535} value={backend.port} aria-invalid={Boolean(errors[`backend.${index}.port`])} onChange={(e) => patchBackend(index, { port: Number(e.target.value) })} /></Field>
           <Field label="Вес" hint={`${percent}% трафика`} error={errors[`backend.${index}.weight`]}><Input type="number" min={1} max={65535} value={backend.weight} aria-invalid={Boolean(errors[`backend.${index}.weight`])} onChange={(e) => patchBackend(index, { weight: Number(e.target.value) })} /></Field>
           <div className="backend-state"><Badge tone={backend.enabled ? "success" : "neutral"}>{backend.enabled ? `${percent}%` : "off"}</Badge>{backendHealth && <Badge tone={backendHealth.state === "reachable" ? "success" : backendHealth.state === "unreachable" ? "danger" : "neutral"}>{backendHealth.state === "reachable" ? `${backendHealth.latency_millis} ms` : backendHealth.state}</Badge>}</div>
@@ -178,5 +178,6 @@ function ListenerDialog({ initial, others, health, onSave, onClose }: { initial:
       })}</div>
     </div>
     <div className="dialog__footer"><Button variant="ghost" onClick={close}>Отмена</Button><Button onClick={submit}>Сохранить запись</Button></div>
+    {confirmClose && <ConfirmDialog title="Закрыть без сохранения?" description="Несохранённые изменения записи будут потеряны." confirmLabel="Закрыть без сохранения" danger onCancel={() => setConfirmClose(false)} onConfirm={() => { setConfirmClose(false); onClose() }} />}
   </Dialog>
 }

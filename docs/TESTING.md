@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v0.1.0-beta.2` and download the generated
-   `ezhiklb_0.1.0-beta.2_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v0.1.0-beta.3` and download the generated
+   `ezhiklb_0.1.0-beta.3_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -71,7 +71,7 @@ Installer backups are stored in `/var/backups/ezhiklb/<timestamp>`. The legacy
 `/etc/ezhik-udp/ezhik-udp.conf` file is never modified. If the first agent apply
 fails during migration, the installer stops the new agent and starts the old
 `ezhik-udp.service` again when it had been active before installation.
-## Beta.2 acceptance checks
+## Beta.2 acceptance checks (still applicable)
 
 Run these only on disposable test VPS nodes.
 
@@ -95,3 +95,12 @@ Run these only on disposable test VPS nodes.
 18. Publish a profile automatically twice and verify the versions advance to `v2` and `v3`. Switch to manual mode, verify invalid characters are rejected and verify an unchanged version cannot be published.
 19. Stop the panel, reboot a node and verify the saved IPVS services and firewall state return before panel connectivity is restored. Start the panel and verify the node converges without reinstalling.
 20. Trigger profile and node actions, open Journal and verify all/node/profile/error filters. Confirm events older than 14 days are removed.
+
+## Beta.3 acceptance checks
+
+21. Install an older release on a node, then in the panel click its "Обновить до <version>" button, confirm the dialog, and verify the agent downloads the matching release, restarts and reports the new version — with a green toast on success. Point the node at a corrupted/mismatched release (or block the download) and verify it reports `update_state=error` with a red toast instead of leaving the agent half-updated.
+22. Open a node's detail dialog and verify the diagnostics card reports IPVS/firewall readiness and service/destination counts that match `sudo ipvsadm -Ln` and `sudo iptables -S EZHIKLB-FORWARD` on that VPS.
+23. On Overview, switch the chart selector between "Все ноды" and an individual node and verify all four charts (network, CPU, RAM, active IPs) update; confirm the charts remain non-empty after 24+ hours of continuous heartbeats (history should not grow past the retention window).
+24. Add a backend whose address equals a node's own IP/observed address and verify the profile editor shows a non-blocking warning without preventing publish.
+25. Close a profile or listener editor with unsaved changes, delete a routing entry and roll back a profile revision, and confirm every one of these now uses the panel's own confirmation dialog (no browser-native confirm popup).
+26. Compare a local node's row against a remote node's row and verify both action-button groups line up at the same horizontal positions.

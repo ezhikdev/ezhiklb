@@ -1,4 +1,4 @@
-import { Check, ChevronDown, X } from "lucide-react"
+import { Activity, Check, ChevronDown, X } from "lucide-react"
 import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react"
 import { useEffect, useId, useRef, useState } from "react"
 import { createPortal } from "react-dom"
@@ -84,4 +84,8 @@ export function Dialog({ title, description, children, onClose, wide = false }: 
 
 export function EmptyState({ icon, title, description, action }: { icon: ReactNode; title: string; description: string; action?: ReactNode }) {
   return <div className="empty-state"><div className="empty-state__icon">{icon}</div><h3>{title}</h3><p>{description}</p>{action}</div>
+}
+
+export function ConfirmDialog({ title, description, confirmLabel, danger = false, busy = false, onCancel, onConfirm }: { title: string; description: string; confirmLabel: string; danger?: boolean; busy?: boolean; onCancel: () => void; onConfirm: () => void | Promise<void> }) {
+  return <Dialog title={title} description="Подтвердите действие" onClose={onCancel}><div className="dialog__body confirm-content"><Activity /><p>{description}</p></div><div className="dialog__footer"><Button variant="ghost" disabled={busy} onClick={onCancel}>Отмена</Button><Button variant={danger ? "danger" : "primary"} disabled={busy} onClick={() => { void onConfirm() }}>{busy ? "Выполняю…" : confirmLabel}</Button></div></Dialog>
 }

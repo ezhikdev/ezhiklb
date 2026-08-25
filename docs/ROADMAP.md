@@ -50,3 +50,20 @@ Beta.1 adds lightweight node telemetry, acknowledged decommission and panel-inde
 3. Support automatic `v1`, `v2`, `v3` profile versions and validated operator-defined versions.
 4. Add a filterable event journal with a strict 14-day retention window.
 5. Complete the node-metric alignment pass and add a permanent project link to the sidebar.
+
+## Beta.3 — self-service operations
+
+1. Node diagnostics (IPVS reachability, firewall chain readiness, service/destination counts) —
+   implemented and shown on the node detail dialog.
+2. Signed, one-click node self-update driven from the panel, with SHA-256 verification and no
+   panel-issued shell commands — implemented.
+3. Overview metrics charts (network, CPU, RAM, active IPs) with 24-hour history and a per-node
+   selector — implemented.
+4. Status squares replacing the "online" text badge, with distinct online/applying/offline/
+   disabled states — implemented.
+5. Every remaining browser `confirm()` prompt replaced with the panel's own dialogs —
+   implemented.
+6. Readable event journal: labels for every audit action and resolved node/profile names instead
+   of raw IDs — implemented.
+7. Non-blocking warning when a backend address matches a known node IP — implemented.
+8. Local-node action row aligned to the same button positions as remote nodes — implemented.

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.0-beta.3
+
+- Added minute-bucket node metric history with a 24-hour retention window and four Overview
+  charts (network, CPU, RAM, active IPs) with a per-node/all-nodes selector.
+- Added a node diagnostics check (IPVS reachability, EzhikLB firewall chain readiness, service
+  and destination counts) shown on every node's detail dialog.
+- Added a signed one-click node self-update: the panel only ever hands the agent a target
+  version, the agent downloads the matching official release archive, verifies its SHA-256
+  checksum and atomically replaces its own binary before restarting.
+- Replaced the "online" text badge next to each node with status squares: pulsing green
+  (online), blinking orange (applying), pulsing red (offline/unreachable), static dark
+  (disabled).
+- Replaced the remaining browser `confirm()` prompts (closing an unsaved profile or listener,
+  restoring a profile revision, deleting a routing entry) with the panel's own confirmation
+  dialogs.
+- Translated the Health page's reachability states and latency label into Russian.
+- Improved the event journal: added labels for token rotation/revocation, manual health probes
+  and update requests, and resolved node/profile IDs to their current names when the audit
+  record itself has no name.
+- Added a non-blocking warning when a listener's backend address matches one of the panel's
+  known node IPs.
+- Aligned the local node's two action buttons to the same optical positions a third button would
+  use, matching the row width of remote nodes.
+
 ## 0.1.0-beta.2
 
 - Added autonomous restoration of the last successfully applied IPVS and firewall state when a node boots while the panel is unavailable.

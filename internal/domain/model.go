@@ -97,8 +97,21 @@ type Node struct {
 	OnlineSince     *time.Time `json:"online_since,omitempty"`
 	LastError       string     `json:"last_error,omitempty"`
 	Metrics         *NodeMetrics `json:"metrics,omitempty"`
+	Diagnostics     *NodeDiagnostics `json:"diagnostics,omitempty"`
+	UpdateTarget    string     `json:"update_target,omitempty"`
+	UpdateState     string     `json:"update_state,omitempty"`
+	UpdateError     string     `json:"update_error,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type NodeDiagnostics struct {
+	IPVSAvailable    bool      `json:"ipvs_available"`
+	FirewallReady    bool      `json:"firewall_ready"`
+	ServiceCount     int       `json:"service_count"`
+	DestinationCount int       `json:"destination_count"`
+	Error             string    `json:"error,omitempty"`
+	CheckedAt         time.Time `json:"checked_at"`
 }
 
 type NodeMetrics struct {
@@ -106,6 +119,17 @@ type NodeMetrics struct {
 	CPUUsedPercent float64   `json:"cpu_used_percent"`
 	Load1          float64   `json:"load_1"`
 	CPUCores       int       `json:"cpu_cores"`
+	NetworkRxBPS   uint64    `json:"network_rx_bps"`
+	NetworkTxBPS   uint64    `json:"network_tx_bps"`
+	ActiveIPs      int       `json:"active_ips"`
+	CollectedAt    time.Time `json:"collected_at"`
+}
+
+type NodeMetricPoint struct {
+	NodeID         string    `json:"node_id"`
+	RAMUsedPercent float64   `json:"ram_used_percent"`
+	CPUUsedPercent float64   `json:"cpu_used_percent"`
+	Load1          float64   `json:"load_1"`
 	NetworkRxBPS   uint64    `json:"network_rx_bps"`
 	NetworkTxBPS   uint64    `json:"network_tx_bps"`
 	ActiveIPs      int       `json:"active_ips"`
@@ -136,6 +160,7 @@ type NodeDesiredState struct {
 	ProfileName     string        `json:"profile_name"`
 	HealthProbe     int64         `json:"health_probe"`
 	Decommission    bool          `json:"decommission"`
+	UpdateVersion   string        `json:"update_version,omitempty"`
 	Config          ProfileConfig `json:"config"`
 }
 

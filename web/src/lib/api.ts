@@ -1,4 +1,4 @@
-import type { AuditEvent, BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "../types"
+import type { AuditEvent, BackendHealth, NodeInfo, NodeMetricPoint, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "../types"
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -40,8 +40,10 @@ export const api = {
   deleteNode: (id: string) => request<void>(`/api/v1/nodes/${id}`, { method: "DELETE" }),
   setNodeEnabled: (id: string, enabled: boolean) => request<void>(`/api/v1/nodes/${id}/enabled`, { method: "PUT", body: JSON.stringify({ enabled }) }),
   requestHealthProbe: (id: string) => request<{ health_probe: number }>(`/api/v1/nodes/${id}/health-probe`, { method: "POST" }),
+  requestNodeUpdate: (id: string) => request<{ version: string }>(`/api/v1/nodes/${id}/update`, { method: "POST" }),
   health: () => request<BackendHealth[]>("/api/v1/health"),
   stats: () => request<ServiceStat[]>("/api/v1/stats"),
+  metricHistory: (nodeID = "all") => request<NodeMetricPoint[]>(`/api/v1/metrics/history?node_id=${encodeURIComponent(nodeID)}`),
   events: (filter = "all") => request<AuditEvent[]>(`/api/v1/events?filter=${encodeURIComponent(filter)}`),
   settings: () => request<SystemSettings>("/api/v1/settings"),
   updateSettings: (settings: SystemSettings) => request<{ settings: SystemSettings; restarting: boolean }>("/api/v1/settings", { method: "PUT", body: JSON.stringify(settings) }),

@@ -76,8 +76,10 @@ func (s *Server) PanelHandler() http.Handler {
 	mux.Handle("POST /api/v1/nodes/{id}/rotate-token", s.admin(http.HandlerFunc(s.rotateNodeToken)))
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", s.admin(http.HandlerFunc(s.revokeNode)))
 	mux.Handle("POST /api/v1/nodes/{id}/health-probe", s.admin(http.HandlerFunc(s.requestHealthProbe)))
+	mux.Handle("POST /api/v1/nodes/{id}/update", s.admin(http.HandlerFunc(s.requestNodeUpdate)))
 	mux.Handle("GET /api/v1/health", s.admin(http.HandlerFunc(s.listHealth)))
 	mux.Handle("GET /api/v1/stats", s.admin(http.HandlerFunc(s.listStats)))
+	mux.Handle("GET /api/v1/metrics/history", s.admin(http.HandlerFunc(s.listMetricHistory)))
 	mux.Handle("GET /api/v1/events", s.admin(http.HandlerFunc(s.listEvents)))
 	mux.Handle("PUT /api/v1/nodes/{id}/profile", s.admin(http.HandlerFunc(s.assignProfile)))
 	mux.Handle("GET /api/v1/settings", s.admin(http.HandlerFunc(s.getSettings)))
@@ -277,6 +279,12 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+func (s *Server) listMetricHistory(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListMetricHistory(r.Context(), r.URL.Query().Get("node_id"))
+	if err != nil { s.internalError(w, err); return }
+	writeJSON(w, http.StatusOK, items)
+}
+
 func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 	var body struct { Name string `json:"name"`; IngressAddress string `json:"ingress_address"`; ProfileID string `json:"profile_id"` }
 	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
@@ -336,6 +344,12 @@ func (s *Server) requestHealthProbe(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
 	if err != nil { s.internalError(w, err); return }
 	writeJSON(w, http.StatusAccepted, map[string]int64{"health_probe": nonce})
+}
+
+func (s *Server) requestNodeUpdate(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.RequestNodeUpdate(r.Context(), r.PathValue("id"), Version); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+	} else if err != nil { s.internalError(w, err) } else { writeJSON(w, http.StatusAccepted, map[string]string{"version": Version}) }
 }
 
 func (s *Server) listHealth(w http.ResponseWriter, r *http.Request) {
@@ -402,7 +416,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	etag := fmt.Sprintf(`"rev-%d-probe-%d"`, state.Revision, state.HealthProbe)
+	etag := fmt.Sprintf(`"rev-%d-probe-%d-update-%s"`, state.Revision, state.HealthProbe, state.UpdateVersion)
 	if state.Decommission { etag = fmt.Sprintf(`"rev-%d-probe-%d-decommission"`, state.Revision, state.HealthProbe) }
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
@@ -421,6 +435,9 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		Health          []domain.BackendHealth `json:"health"`
 		Stats           []domain.ServiceStat `json:"stats"`
 		Metrics         domain.NodeMetrics `json:"metrics"`
+		Diagnostics     domain.NodeDiagnostics `json:"diagnostics"`
+		UpdateState     string `json:"update_state"`
+		UpdateError     string `json:"update_error"`
 		Decommissioned  bool `json:"decommissioned"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -429,7 +446,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	observedAddress := remoteIPv4(r)
 	if r.PathValue("id") == "local" && (observedAddress == "127.0.0.1" || observedAddress == "::1") { observedAddress = "" }
-	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
+	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Diagnostics, body.UpdateState, body.UpdateError, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
 		s.internalError(w, err)
@@ -558,6 +575,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-beta.2"
+const Version = "0.1.0-beta.3"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

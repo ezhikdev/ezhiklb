@@ -135,6 +135,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS node_metric_history (
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			ram_used_percent REAL NOT NULL DEFAULT 0,
+			cpu_used_percent REAL NOT NULL DEFAULT 0,
+			load_1 REAL NOT NULL DEFAULT 0,
+			network_rx_bps INTEGER NOT NULL DEFAULT 0,
+			network_tx_bps INTEGER NOT NULL DEFAULT 0,
+			active_ips INTEGER NOT NULL DEFAULT 0,
+			collected_at TEXT NOT NULL,
+			PRIMARY KEY(node_id, collected_at)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -153,6 +164,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"network_tx_bps", `INTEGER NOT NULL DEFAULT 0`},
 		{"active_ips", `INTEGER NOT NULL DEFAULT 0`},
 		{"metrics_collected_at", `TEXT`},
+		{"diagnostics_json", `TEXT NOT NULL DEFAULT '{}'`},
+		{"update_target", `TEXT NOT NULL DEFAULT ''`},
+		{"update_state", `TEXT NOT NULL DEFAULT 'idle'`},
+		{"update_error", `TEXT NOT NULL DEFAULT ''`},
 		{"auto_version", `INTEGER NOT NULL DEFAULT 1`},
 		{"version_label", `TEXT NOT NULL DEFAULT ''`},
 	} {
@@ -549,12 +564,12 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 	var result domain.NodeDesiredState
 	var configJSON string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.status='deleting',r.config_json
+		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.status='deleting',n.update_target,r.config_json
 		FROM nodes n
 		JOIN profiles p ON p.id=n.profile_id
 		JOIN profile_revisions r ON r.profile_id=p.id AND r.number=n.desired_revision
 		LEFT JOIN node_probe_requests q ON q.node_id=n.id
-		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.Decommission, &configJSON)
+		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.Decommission, &result.UpdateVersion, &configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrNotFound
 	}
@@ -565,6 +580,14 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 		return result, err
 	}
 	return result, nil
+}
+
+func (s *Store) RequestNodeUpdate(ctx context.Context, nodeID, version string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET update_target=?,update_state='requested',update_error='',updated_at=? WHERE id=? AND status<>'disabled'`, version, formatTime(time.Now().UTC()), nodeID)
+	if err != nil { return err }
+	affected, _ := result.RowsAffected()
+	if affected == 0 { return ErrNotFound }
+	return s.Audit(ctx, "node.update_requested", "node", nodeID, map[string]any{"version": version})
 }
 
 func (s *Store) RequestHealthProbe(ctx context.Context, nodeID string) (int64, error) {
@@ -578,7 +601,7 @@ func (s *Store) RequestHealthProbe(ctx context.Context, nodeID string) (int64, e
 	return nonce, nil
 }
 
-func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, decommissioned bool) error {
+func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, diagnostics domain.NodeDiagnostics, updateState, updateError string, decommissioned bool) error {
 	status := "online"
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -613,8 +636,13 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	}
 	metricsAt := formatTime(metrics.CollectedAt)
 	if metrics.CollectedAt.IsZero() { metricsAt = formatTime(now) }
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,updated_at=? WHERE id=? AND status<>'disabled'`,
-		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, formatTime(now), nodeID)
+	diagnosticsJSON, _ := json.Marshal(diagnostics)
+	if updateState == "" { updateState = "idle" }
+	var updateTarget string
+	_ = tx.QueryRowContext(ctx, `SELECT update_target FROM nodes WHERE id=?`, nodeID).Scan(&updateTarget)
+	if updateTarget != "" && version == updateTarget { updateState = "completed"; updateError = ""; updateTarget = "" }
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,updated_at=? WHERE id=? AND status<>'disabled'`,
+		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, formatTime(now), nodeID)
 	if err != nil {
 		return err
 	}
@@ -627,6 +655,9 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	} else if applyError == "" && previousError != "" {
 		if err := auditTx(ctx, tx, "node.apply_recovered", "node", nodeID, map[string]any{"revision": applied}); err != nil { return err }
 	}
+	metricMinute := now.Truncate(time.Minute)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO node_metric_history(node_id,ram_used_percent,cpu_used_percent,load_1,network_rx_bps,network_tx_bps,active_ips,collected_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(node_id,collected_at) DO UPDATE SET ram_used_percent=excluded.ram_used_percent,cpu_used_percent=excluded.cpu_used_percent,load_1=excluded.load_1,network_rx_bps=excluded.network_rx_bps,network_tx_bps=excluded.network_tx_bps,active_ips=excluded.active_ips`, nodeID, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, formatTime(metricMinute)); err != nil { return err }
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_metric_history WHERE collected_at<?`, formatTime(now.Add(-24*time.Hour))); err != nil { return err }
 	if _, err := tx.ExecContext(ctx, `DELETE FROM backend_health WHERE node_id=?`, nodeID); err != nil {
 		return err
 	}
@@ -695,6 +726,22 @@ func (s *Store) ListStats(ctx context.Context) ([]domain.ServiceStat, error) {
 	return result, rows.Err()
 }
 
+func (s *Store) ListMetricHistory(ctx context.Context, nodeID string) ([]domain.NodeMetricPoint, error) {
+	query := `SELECT node_id,ram_used_percent,cpu_used_percent,load_1,network_rx_bps,network_tx_bps,active_ips,collected_at FROM node_metric_history WHERE collected_at>=?`
+	args := []any{formatTime(time.Now().UTC().Add(-24*time.Hour))}
+	if nodeID != "" && nodeID != "all" { query += ` AND node_id=?`; args = append(args, nodeID) }
+	query += ` ORDER BY collected_at`
+	rows, err := s.db.QueryContext(ctx, query, args...); if err != nil { return nil, err }; defer rows.Close()
+	result := make([]domain.NodeMetricPoint, 0)
+	for rows.Next() {
+		var item domain.NodeMetricPoint; var collected string
+		if err := rows.Scan(&item.NodeID, &item.RAMUsedPercent, &item.CPUUsedPercent, &item.Load1, &item.NetworkRxBPS, &item.NetworkTxBPS, &item.ActiveIPs, &collected); err != nil { return nil, err }
+		item.CollectedAt, err = parseTime(collected); if err != nil { return nil, err }
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 type scanner interface{ Scan(...any) error }
 
 func scanProfile(row scanner) (domain.Profile, error) {
@@ -730,14 +777,15 @@ func (s *Store) getRevision(ctx context.Context, profileID string, number int64)
 	return r, err
 }
 
-const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,created_at,updated_at FROM nodes`
+const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,created_at,updated_at FROM nodes`
 
 func scanNode(row scanner) (domain.Node, error) {
 	var n domain.Node
 	var lastSeen, onlineSince, metricsAt sql.NullString
 	var created, updated string
 	var metrics domain.NodeMetrics
-	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &created, &updated)
+	var diagnosticsJSON string
+	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &created, &updated)
 	if err != nil {
 		return n, err
 	}
@@ -759,6 +807,8 @@ func scanNode(row scanner) (domain.Node, error) {
 		metrics.CollectedAt = parsed
 		n.Metrics = &metrics
 	}
+	var diagnostics domain.NodeDiagnostics
+	if json.Unmarshal([]byte(diagnosticsJSON), &diagnostics) == nil && !diagnostics.CheckedAt.IsZero() { n.Diagnostics = &diagnostics }
 	n.CreatedAt, err = parseTime(created)
 	if err == nil {
 		n.UpdatedAt, err = parseTime(updated)
