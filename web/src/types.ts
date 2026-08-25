@@ -80,7 +80,7 @@ export interface NodeInfo {
   metrics?: NodeMetrics
   diagnostics?: NodeDiagnostics
   update_target?: string
-  update_state?: "idle" | "requested" | "updating" | "completed" | "error"
+  update_state?: "idle" | "requested" | "downloading" | "verifying" | "installing" | "restarting" | "completed" | "error"
   update_error?: string
 }
 

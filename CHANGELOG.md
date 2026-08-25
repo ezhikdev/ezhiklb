@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-beta.3.1
+
+- Added real per-stage progress reporting for node self-update (`downloading`, `verifying`,
+  `installing`, `restarting`), each reported to the panel via heartbeat as it starts, and shown
+  as an orange progress bar on the node row while an update is in flight.
+- Changed the "Обновить" button to hide while an update is already in progress, preventing
+  duplicate update requests.
+- Changed the node-update notification to fire on confirmed completion or failure (detected from
+  the node's own reported state) instead of immediately after the request was merely accepted.
+- Fixed a version-comparison bug that made `isOlderVersion` treat versions like `0.1.0-beta.3.1`
+  as equal to `0.1.0-beta.3` (it only compared the first number after the prerelease channel,
+  dropping any further `.N` segments), which could hide the update button entirely.
+- Added animated hover tooltips to the Overview metric charts: a crosshair with per-series
+  markers and a floating panel showing the exact time and value under the pointer.
+
 ## 0.1.0-beta.3
 
 - Added minute-bucket node metric history with a 24-hour retention window and four Overview

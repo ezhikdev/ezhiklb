@@ -15,16 +15,31 @@ import (
 	"strings"
 )
 
+// Update stage names reported to the panel via heartbeat while an update is
+// in progress, so the UI can show real (coarse-grained) progress instead of
+// a single opaque "updating" state.
+const (
+	UpdateStageDownloading = "downloading"
+	UpdateStageVerifying   = "verifying"
+	UpdateStageInstalling  = "installing"
+)
+
 // InstallAgentUpdate downloads an official release, verifies SHA-256 and
 // atomically replaces only the agent binary. No command comes from the panel.
-func InstallAgentUpdate(ctx context.Context, version string) error {
+// onStage, if non-nil, is called as each stage starts so the caller can
+// report progress upstream before the (possibly slow) step runs.
+func InstallAgentUpdate(ctx context.Context, version string, onStage func(stage string)) error {
 	if version == "" || strings.ContainsAny(version, `/\\ \t\r\n`) { return fmt.Errorf("invalid update version") }
+	if onStage == nil { onStage = func(string) {} }
 	asset := fmt.Sprintf("ezhiklb_%s_linux_amd64.tar.gz", version)
 	base := fmt.Sprintf("https://github.com/ezhikdev/ezhiklb/releases/download/v%s/", version)
+	onStage(UpdateStageDownloading)
 	archive, err := download(ctx, base+asset, 256<<20); if err != nil { return err }
 	checksum, err := download(ctx, base+asset+".sha256", 4096); if err != nil { return err }
+	onStage(UpdateStageVerifying)
 	want := strings.Fields(string(checksum)); if len(want) == 0 { return fmt.Errorf("empty checksum file") }
 	got := sha256.Sum256(archive); if !strings.EqualFold(hex.EncodeToString(got[:]), want[0]) { return fmt.Errorf("release checksum mismatch") }
+	onStage(UpdateStageInstalling)
 	binary, err := extractAgent(archive); if err != nil { return err }
 	current, err := os.Executable(); if err != nil { return err }
 	tmp, err := os.CreateTemp(filepath.Dir(current), ".ezhiklb-agent-update-*"); if err != nil { return err }

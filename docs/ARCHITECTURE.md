@@ -112,3 +112,16 @@ the `ezhiklb-agent` binary, and atomically renames it over the running executabl
 systemd to restart the service. A failed download, checksum mismatch or extraction error leaves
 the running binary untouched and is reported back as `update_state=error` with the failure
 reason, never partially applied.
+
+The agent reports each stage (`requested`, `downloading`, `verifying`, `installing`,
+`restarting`) via an immediate heartbeat as that stage starts, rather than sending a single
+opaque "updating" state for the whole operation. The panel stores whatever `update_state` string
+the agent sends verbatim (no server-side enum) and only overrides it to `completed` once a
+heartbeat arrives whose reported `version` matches the requested `update_target`. This keeps the
+progress reporting honest — it reflects what the agent is actually doing, not a fabricated
+timer — while remaining forward-compatible with future stage names without a schema change.
+
+Self-update is inherently bootstrap-limited: a node can only react to a panel-issued update
+request if its *currently running* agent binary already contains this polling/reporting logic.
+A node still on a pre-`beta.3` agent must be upgraded once through the ordinary install command
+before the one-click button has any effect on it.

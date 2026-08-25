@@ -2,7 +2,7 @@
 
 **EzhikLB (Ezhik Load Balancer)** — панель управления TCP- и UDP-балансировкой на Linux. Панель хранит профили, а агенты на нодах применяют их через IPVS в ядре Linux.
 
-Текущая версия: **0.1.0-beta.3 pre-release**.
+Текущая версия: **0.1.0-beta.3.1 pre-release**.
 
 ## Что уже работает
 
@@ -38,10 +38,10 @@
 Команда одинакова для панели и ноды. После запуска установщик сам предложит выбрать вариант:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-beta.3 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-beta.3.1 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
-> Команда заработает после публикации тега `v0.1.0-beta.3`. Ошибка `404` означает, что архив pre-release ещё не собран.
+> Команда заработает после публикации тега `v0.1.0-beta.3.1`. Ошибка `404` означает, что архив pre-release ещё не собран.
 
 Меню установщика:
 
@@ -160,7 +160,7 @@ sudo tar --ignore-failed-read -czf "/root/ezhiklb-backup-$(date +%Y%m%d-%H%M%S).
 
 Автоматические копии перед обновлением находятся в `/var/backups/ezhiklb`.
 
-## Проверка `beta.3` на двух VPS
+## Проверка `beta.3.1` на двух VPS
 
 На первой VPS установите **Панель** или **Панель + локальная нода** и выберите сетевой доступ. Затем создайте ноду в панели и выполните полученную команду на второй VPS.
 
@@ -181,28 +181,34 @@ sudo systemctl status ezhiklb-agent --no-pager -l && sudo journalctl -u ezhiklb-
 - обновление агента при временно выключенной панели;
 - появление RAM, CPU, сети и активных IP после двух heartbeat;
 - удаление удалённой ноды с очисткой её IPVS-маршрутов и отключением агента;
-- обновление ноды одной кнопкой из панели и появление уведомления об успехе или ошибке;
+- обновление ноды одной кнопкой из панели, оранжевую шкалу реального прогресса (скачивание →
+  проверка → установка → перезапуск) и уведомление именно по факту завершения, а не по факту
+  отправки запроса;
 - статус IPVS и firewall-цепочек в карточке диагностики ноды.
 
-## Публикация `beta.3 pre-release`
+## Публикация `beta.3.1 pre-release`
 
 Сначала загрузите изменённые файлы в `main`, затем создайте тег **обязательно с буквой `v`**:
 
 ```bash
-git tag v0.1.0-beta.3 && git push origin v0.1.0-beta.3
+git tag v0.1.0-beta.3.1 && git push origin v0.1.0-beta.3.1
 ```
 
 Правильный тег автоматически создаст GitHub Pre-release и два файла:
 
 ```text
-ezhiklb_0.1.0-beta.3_linux_amd64.tar.gz
-ezhiklb_0.1.0-beta.3_linux_amd64.tar.gz.sha256
+ezhiklb_0.1.0-beta.3.1_linux_amd64.tar.gz
+ezhiklb_0.1.0-beta.3.1_linux_amd64.tar.gz.sha256
 ```
 
-Тег `0.1.0-beta.3` без `v` workflow не запускает.
+Тег `0.1.0-beta.3.1` без `v` workflow не запускает.
+
+### Важно об обновлении ноды одной кнопкой
+
+Кнопка «Обновить» появляется, когда `agent_version` ноды отличается от версии панели. Она работает по правилам pull-обновления: **агент сам себя обновляет**, поэтому уже запущенный агент обязан понимать команду на обновление. Для ноды, которая ещё ни разу не была на `beta.3` или новее, первое обновление до `beta.3.1` нужно выполнить как обычно — переустановкой той же командой из панели. После этого разового шага все дальнейшие обновления (например, следующий `beta.3.2`) будут срабатывать по одной кнопке без переустановки.
 
 ## Статус проекта
 
-`beta.3` — версия для ограниченной эксплуатации: добавлены графики нагрузки, диагностика ноды, обновление ноды одной кнопкой с проверкой SHA-256, понятные статусы подключения и читаемый журнал событий. Перед использованием на основном трафике необходимо проверить обновление и удаление минимум на двух тестовых VPS.
+`beta.3.1` — исправления после первого прогона `beta.3` на реальных VPS: у обновления ноды теперь есть настоящая пошаговая шкала прогресса (скачивание → проверка → установка → перезапуск), кнопка обновления блокируется на время активного обновления, уведомление о результате приходит по факту завершения или ошибки, а не сразу после нажатия, и на графиках Обзора появились анимированные подсказки при наведении. Перед использованием на основном трафике необходимо проверить обновление и удаление минимум на двух тестовых VPS.
 
 Подробности: [`docs/ROADMAP.md`](docs/ROADMAP.md) и [`docs/TESTING.md`](docs/TESTING.md).

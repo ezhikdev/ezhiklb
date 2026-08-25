@@ -1,5 +1,5 @@
 import { Activity, ArrowDown, ArrowUp, Boxes, CheckCircle2, ChevronDown, ChevronRight, CircleGauge, Clock3, Copy, Cpu, Github, HeartPulse, Hexagon, History, LoaderCircle, LogOut, MemoryStick, Network, Pencil, Plus, Power, RefreshCw, Save, ScrollText, Server, Settings, ShieldCheck, Trash2, Users } from "lucide-react"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ApiError, api } from "./lib/api"
 import type { AuditEvent, BackendHealth, NodeInfo, NodeMetricPoint, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "./types"
 import { ProfileEditor } from "./components/ProfileEditor"
@@ -13,8 +13,16 @@ const nav = [
 ] as const
 
 const emptyConfig = (): ProfileConfig => ({ schema_version: 1, health_check: { enabled: true, interval_seconds: 10, timeout_millis: 1000, failure_threshold: 3, recovery_threshold: 2 }, listeners: [] })
-const releaseVersion = "0.1.0-beta.3"
+const releaseVersion = "0.1.0-beta.3.1"
 const shellArg = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`
+const updateStageInfo: Record<string, { percent: number; label: string }> = {
+  requested: { percent: 8, label: "Отправлен запрос…" },
+  updating: { percent: 15, label: "Подготовка обновления…" },
+  downloading: { percent: 32, label: "Скачивание релиза…" },
+  verifying: { percent: 58, label: "Проверка SHA-256…" },
+  installing: { percent: 78, label: "Установка…" },
+  restarting: { percent: 93, label: "Перезапуск агента…" },
+}
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
@@ -159,6 +167,18 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
     const timer = window.setInterval(() => { void onChanged() }, 3000)
     return () => window.clearInterval(timer)
   }, [credential, liveCredentialNode?.status, onChanged])
+  const previousUpdateState = useRef<Record<string, string>>({})
+  useEffect(() => {
+    for (const node of nodes) {
+      const previous = previousUpdateState.current[node.id]
+      const current = node.update_state ?? "idle"
+      if (previous && previous !== current) {
+        if (current === "completed") { setToast({ tone: "success", text: `Нода «${node.name}» обновлена до ${node.agent_version || releaseVersion}` }); window.setTimeout(() => setToast(null), 4000) }
+        else if (current === "error") { setToast({ tone: "danger", text: `Не удалось обновить «${node.name}»: ${node.update_error || "ошибка обновления"}` }); window.setTimeout(() => setToast(null), 6000) }
+      }
+      previousUpdateState.current[node.id] = current
+    }
+  }, [nodes])
   const create = async () => { const profileID = profiles[0]?.id; if (!profileID) return; setBusy(true); setEnrollError(""); try { const result = await api.createNode(name.trim(), "", profileID); setCredential({ node: result.node, token: result.agent_token }); await onChanged() } catch (reason) { setEnrollError(reason instanceof Error ? reason.message : "Не удалось создать ноду") } finally { setBusy(false) } }
   const beginAdd = () => { setName(""); setCredential(null); setAgentURL(initialAgentURL); setEnrollError(""); setCopied(false); setAdding(true) }
   const copyInstallCommand = async () => {
@@ -173,10 +193,13 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
     <Card className="table-card"><div className="node-table">{nodes.map((node) => {
       const locked = node.status === "deleting"
       const assignedProfile = profiles.find((profile) => profile.id === node.profile_id)
+      const updateStage = node.update_state ? updateStageInfo[node.update_state] : undefined
+      const updating = Boolean(updateStage)
       return <div className={`node-table__row ${node.status === "disabled" ? "node-table__row--disabled" : ""} ${locked ? "node-table__row--deleting" : ""}`} key={node.id}>
         <button type="button" className="node-name node-name--button" onClick={() => setSelectedNode(node)}><div className={`node-avatar node-avatar--${nodeVisualState(node)}`}><Server /></div><div><strong>{node.name}</strong><span className="mono">{node.observed_address || node.ingress_address || "IP определится при подключении"} · {node.agent_version || "ожидает агента"}</span><small>{node.status === "online" && node.online_since ? `В сети ${formatDuration(Date.now() - new Date(node.online_since).getTime())}` : node.status === "deleting" ? "Ожидаем очистку конфигурации на VPS" : node.last_seen_at ? `Последний ответ ${formatRelative(node.last_seen_at)}` : "Heartbeat ещё не получен"}</small><NodeMetricsStrip node={node} /></div></button>
         <div className="compact-select"><span>Профиль</span>{locked ? <strong className="node-locked">Удаление…</strong> : <SelectMenu compact label={`Профиль ноды ${node.name}`} value={node.profile_id} onChange={async (value) => { await api.assignProfile(node.id, value); await onChanged() }} options={profiles.map((profile) => ({ value: profile.id, label: profile.name, description: profile.version }))} />}</div>
-        <div className="node-actions"><div className="revision-state"><span>{applyStateLabel(node)}</span><span>{assignedProfile?.version || "версия неизвестна"}</span>{node.update_state === "error" && <span className="revision-error" title={node.update_error}>{node.update_error}</span>}{isOlderVersion(node.agent_version, releaseVersion) && node.status === "online" && <Button variant="secondary" className="node-update-button" onClick={() => setConfirmNode({ node, action: "update" })}><RefreshCw />Обновить до {releaseVersion}</Button>}{node.last_error && <span className="revision-error" title={node.last_error}>{node.last_error}</span>}</div>{!locked && <div className={`node-action-buttons ${node.id === "local" ? "node-action-buttons--local" : ""}`}><Button variant="ghost" className="icon-button" title="Изменить" aria-label={`Изменить ${node.name}`} onClick={() => { setEditingNode(node); setEditName(node.name) }}><Pencil /></Button><Button variant="ghost" className="icon-button" title={node.status === "disabled" ? "Включить" : "Выключить"} aria-label={`${node.status === "disabled" ? "Включить" : "Выключить"} ${node.name}`} onClick={() => { void changeEnabled(node) }}><Power /></Button>{node.id !== "local" && <Button variant="ghost" className="icon-button danger-hover" title="Удалить" aria-label={`Удалить ${node.name}`} onClick={() => setConfirmNode({ node, action: "delete" })}><Trash2 /></Button>}</div>}</div>
+        <div className="node-actions"><div className="revision-state"><span>{applyStateLabel(node)}</span><span>{assignedProfile?.version || "версия неизвестна"}</span>{node.update_state === "error" && <span className="revision-error" title={node.update_error}>{node.update_error}</span>}{!updating && isOlderVersion(node.agent_version, releaseVersion) && node.status === "online" && <Button variant="secondary" className="node-update-button" onClick={() => setConfirmNode({ node, action: "update" })}><RefreshCw />Обновить до {releaseVersion}</Button>}{node.last_error && <span className="revision-error" title={node.last_error}>{node.last_error}</span>}</div>{!locked && <div className={`node-action-buttons ${node.id === "local" ? "node-action-buttons--local" : ""}`}><Button variant="ghost" className="icon-button" title="Изменить" aria-label={`Изменить ${node.name}`} onClick={() => { setEditingNode(node); setEditName(node.name) }}><Pencil /></Button><Button variant="ghost" className="icon-button" title={node.status === "disabled" ? "Включить" : "Выключить"} aria-label={`${node.status === "disabled" ? "Включить" : "Выключить"} ${node.name}`} onClick={() => { void changeEnabled(node) }}><Power /></Button>{node.id !== "local" && <Button variant="ghost" className="icon-button danger-hover" title="Удалить" aria-label={`Удалить ${node.name}`} onClick={() => setConfirmNode({ node, action: "delete" })}><Trash2 /></Button>}</div>}</div>
+        {updateStage && <div className="update-progress" role="progressbar" aria-valuenow={updateStage.percent} aria-valuemin={0} aria-valuemax={100} aria-label={`Обновление ${node.name}: ${updateStage.label}`}><RefreshCw className="spin" /><div className="update-progress__track"><div className="update-progress__fill" style={{ width: `${updateStage.percent}%` }} /></div><span className="update-progress__label">{updateStage.label}</span></div>}
       </div>
     })}</div></Card>
     {adding && <Dialog title={credential ? `Подключение · ${credential.node.name}` : "Новая нода"} description={credential ? "Выполните команду на VPS — статус обновится автоматически." : "Шаг 1 из 2 · задайте понятное название сервера."} onClose={() => { setAdding(false); setCredential(null) }}>
@@ -195,7 +218,7 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
       </>}
     </Dialog>}
     {editingNode && <Dialog title={`Редактирование · ${editingNode.name}`} description="Измените отображаемое имя ноды." onClose={() => setEditingNode(null)}><div className="dialog__body form-stack"><Field label="Название ноды"><Input value={editName} onChange={(event) => setEditName(event.target.value)} autoFocus /></Field><div className="notice"><Network /><div><strong>IPv4 определяется автоматически</strong><span className="mono">{editingNode.observed_address || editingNode.ingress_address || "Появится после первого heartbeat"}</span></div></div></div><div className="dialog__footer"><Button variant="ghost" onClick={() => setEditingNode(null)}>Отмена</Button><Button disabled={busy || !editName.trim()} onClick={async () => { setBusy(true); try { await api.updateNode(editingNode.id, editName.trim(), editingNode.ingress_address); setEditingNode(null); await onChanged() } finally { setBusy(false) } }}><Save data-icon="inline-start" />{busy ? "Сохраняю…" : "Сохранить"}</Button></div></Dialog>}
-    {confirmNode && <ConfirmDialog title={confirmNode.action === "delete" ? "Удалить ноду?" : confirmNode.action === "update" ? "Обновить агент ноды?" : "Выключить ноду?"} description={confirmNode.action === "delete" ? `EzhikLB очистит свои маршруты на «${confirmNode.node.name}», остановит агент и удалит ноду из панели.` : confirmNode.action === "update" ? `Нода «${confirmNode.node.name}» проверит официальный релиз ${releaseVersion}, заменит агент и автоматически перезапустит его. Маршруты IPVS продолжат работать.` : `Нода «${confirmNode.node.name}» перестанет принимать новые настройки панели. Текущая балансировка продолжит работать.`} confirmLabel={confirmNode.action === "delete" ? "Удалить ноду" : confirmNode.action === "update" ? "Обновить ноду" : "Выключить"} danger={confirmNode.action === "delete"} busy={busy} onCancel={() => setConfirmNode(null)} onConfirm={async () => { setBusy(true); try { if (confirmNode.action === "delete") await api.deleteNode(confirmNode.node.id); else if (confirmNode.action === "update") { await api.requestNodeUpdate(confirmNode.node.id); setToast({ tone: "success", text: `Обновление ${confirmNode.node.name} запущено` }); window.setTimeout(() => setToast(null), 4000) } else await api.setNodeEnabled(confirmNode.node.id, false); setConfirmNode(null); await onChanged() } catch (reason) { setToast({ tone: "danger", text: reason instanceof Error ? reason.message : "Не удалось выполнить действие" }); window.setTimeout(() => setToast(null), 5000) } finally { setBusy(false) } }} />}
+    {confirmNode && <ConfirmDialog title={confirmNode.action === "delete" ? "Удалить ноду?" : confirmNode.action === "update" ? "Обновить агент ноды?" : "Выключить ноду?"} description={confirmNode.action === "delete" ? `EzhikLB очистит свои маршруты на «${confirmNode.node.name}», остановит агент и удалит ноду из панели.` : confirmNode.action === "update" ? `Нода «${confirmNode.node.name}» проверит официальный релиз ${releaseVersion}, заменит агент и автоматически перезапустит его. Маршруты IPVS продолжат работать.` : `Нода «${confirmNode.node.name}» перестанет принимать новые настройки панели. Текущая балансировка продолжит работать.`} confirmLabel={confirmNode.action === "delete" ? "Удалить ноду" : confirmNode.action === "update" ? "Обновить ноду" : "Выключить"} danger={confirmNode.action === "delete"} busy={busy} onCancel={() => setConfirmNode(null)} onConfirm={async () => { setBusy(true); try { if (confirmNode.action === "delete") await api.deleteNode(confirmNode.node.id); else if (confirmNode.action === "update") await api.requestNodeUpdate(confirmNode.node.id); else await api.setNodeEnabled(confirmNode.node.id, false); setConfirmNode(null); await onChanged() } catch (reason) { setToast({ tone: "danger", text: reason instanceof Error ? reason.message : "Не удалось выполнить действие" }); window.setTimeout(() => setToast(null), 5000) } finally { setBusy(false) } }} />}
     {toast && <div className={`toast toast--${toast.tone}`} role="status"><CheckCircle2 />{toast.text}</div>}
     {selectedNode && <NodeDetails node={nodes.find((node) => node.id === selectedNode.id) ?? selectedNode} profile={profiles.find((profile) => profile.id === selectedNode.profile_id)} stats={stats.filter((item) => item.node_id === selectedNode.id)} health={health.filter((item) => item.node_id === selectedNode.id)} onClose={() => setSelectedNode(null)} />}
   </div>
@@ -318,10 +341,37 @@ function aggregateMetricHistory(items: NodeMetricPoint[], aggregate: boolean): N
 }
 function MetricChart({ title, icon, points, series, format }: { title: string; icon: React.ReactNode; points: NodeMetricPoint[]; series: { key: MetricKey; label: string; color: "success" | "warning" | "accent" }[]; format: (value: number) => string }) {
   const width = 560, height = 150, padding = 12
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null)
   const max = Math.max(1, ...points.flatMap((point) => series.map((item) => Number(point[item.key]))))
-  const pathFor = (key: MetricKey) => points.map((point, index) => { const x = padding + (points.length < 2 ? 0 : index * (width - padding * 2) / (points.length - 1)); const y = height - padding - Number(point[key]) / max * (height - padding * 2); return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}` }).join(" ")
+  const xAt = (index: number) => padding + (points.length < 2 ? 0 : index * (width - padding * 2) / (points.length - 1))
+  const yAt = (key: MetricKey, index: number) => height - padding - Number(points[index][key]) / max * (height - padding * 2)
+  const pathFor = (key: MetricKey) => points.map((point, index) => `${index ? "L" : "M"}${xAt(index).toFixed(1)},${yAt(key, index).toFixed(1)}`).join(" ")
   const latest = points.at(-1)
-  return <Card className="metric-chart"><div className="metric-chart__header"><div>{icon}<div><span>{title}</span><strong>{latest ? series.map((item) => `${item.label}: ${format(Number(latest[item.key]))}`).join(" · ") : "Нет данных"}</strong></div></div><div className="metric-chart__legend">{series.map((item) => <span key={item.key}><i className={`chart-color--${item.color}`} />{item.label}</span>)}</div></div><div className="metric-chart__canvas">{points.length < 2 ? <span>График появится после двух минут сбора данных</span> : <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title} за последние 24 часа`} preserveAspectRatio="none"><path className="chart-grid-line" d={`M${padding},${height / 2} H${width - padding}`} />{series.map((item) => <path key={item.key} className={`chart-line chart-line--${item.color}`} d={pathFor(item.key)} />)}</svg>}</div></Card>
+  const index = hoverIndex == null ? null : Math.min(hoverIndex, points.length - 1)
+  const hovered = index == null ? null : points[index]
+  const headline = hovered ?? latest
+  const trackPointer = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (points.length < 2) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const relativeX = (event.clientX - rect.left) / rect.width * width
+    const step = (width - padding * 2) / (points.length - 1)
+    setHoverIndex(Math.min(points.length - 1, Math.max(0, Math.round((relativeX - padding) / step))))
+  }
+  const tooltipPercent = index == null ? 0 : Math.min(94, Math.max(6, (xAt(index) / width) * 100))
+  return <Card className="metric-chart"><div className="metric-chart__header"><div>{icon}<div><span>{title}</span><strong>{headline ? series.map((item) => `${item.label}: ${format(Number(headline[item.key]))}`).join(" · ") : "Нет данных"}</strong></div></div><div className="metric-chart__legend">{series.map((item) => <span key={item.key}><i className={`chart-color--${item.color}`} />{item.label}</span>)}</div></div><div className="metric-chart__canvas">{points.length < 2 ? <span>График появится после двух минут сбора данных</span> : <>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title} за последние 24 часа`} preserveAspectRatio="none" onPointerMove={trackPointer} onPointerDown={trackPointer} onPointerLeave={() => setHoverIndex(null)} onPointerUp={() => setHoverIndex(null)} onPointerCancel={() => setHoverIndex(null)}>
+      <path className="chart-grid-line" d={`M${padding},${height / 2} H${width - padding}`} />
+      {series.map((item) => <path key={item.key} className={`chart-line chart-line--${item.color}`} d={pathFor(item.key)} />)}
+      {index != null && <g aria-hidden="true">
+        <line className="chart-hover-line" x1={xAt(index)} x2={xAt(index)} y1={padding} y2={height - padding} />
+        {series.map((item) => <circle key={item.key} className={`chart-hover-dot chart-hover-dot--${item.color}`} cx={xAt(index)} cy={yAt(item.key, index)} r={3.5} />)}
+      </g>}
+    </svg>
+    {hovered && <div className="chart-tooltip" style={{ left: `${tooltipPercent}%` }} aria-hidden="true">
+      <time>{new Date(hovered.collected_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</time>
+      {series.map((item) => <div key={item.key}><i className={`chart-color--${item.color}`} /><span>{item.label}</span><strong>{format(Number(hovered[item.key]))}</strong></div>)}
+    </div>}
+  </>}</div></Card>
 }
 function Placeholder({ title, description, icon }: { title: string; description: string; icon: React.ReactNode }) { return <div className="page"><PageHeader eyebrow="EzhikLB" title={title} description={description} /><Card><EmptyState icon={icon} title="Раздел готовится" description={description} /></Card></div> }
 function formatNumber(value: number) { return new Intl.NumberFormat("ru-RU", { notation: value >= 10000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value) }
@@ -341,9 +391,10 @@ function isOlderVersion(current: string | undefined, target: string): boolean {
   const parse = (value: string) => {
     const [core, ...prereleaseParts] = value.replace(/^v/i, "").split("-")
     const [major, minor, patch] = core.split(".").map((part) => Number(part) || 0)
-    const prerelease = prereleaseParts.join("-")
-    const [channel, channelNumber] = prerelease ? prerelease.split(".") : ["", ""]
-    return { major, minor, patch, channel, channelNumber: Number(channelNumber) || 0 }
+    const segments = prereleaseParts.join("-").split(".").filter(Boolean)
+    const channel = segments[0] ?? ""
+    const channelNumbers = segments.slice(1).map((part) => Number(part) || 0)
+    return { major, minor, patch, channel, channelNumbers }
   }
   const a = parse(current), b = parse(target)
   if (a.major !== b.major) return a.major < b.major
@@ -352,6 +403,11 @@ function isOlderVersion(current: string | undefined, target: string): boolean {
   const rank: Record<string, number> = { "": 3, alpha: 1, beta: 2 }
   const rankOf = (channel: string) => rank[channel] ?? 2
   if (a.channel !== b.channel) return rankOf(a.channel) < rankOf(b.channel)
-  return a.channelNumber < b.channelNumber
+  const depth = Math.max(a.channelNumbers.length, b.channelNumbers.length)
+  for (let i = 0; i < depth; i++) {
+    const av = a.channelNumbers[i] ?? 0, bv = b.channelNumbers[i] ?? 0
+    if (av !== bv) return av < bv
+  }
+  return false
 }
 function revisionDiff(value: ProfileConfig, current: ProfileConfig) { const backends = value.listeners.reduce((sum, listener) => sum + listener.backends.length, 0); if (JSON.stringify(value) === JSON.stringify(current)) return `${value.listeners.length} записей · ${backends} выходов · текущая конфигурация`; const currentBackends = current.listeners.reduce((sum, listener) => sum + listener.backends.length, 0); const listenerDelta = value.listeners.length - current.listeners.length; const backendDelta = backends - currentBackends; const changes = [`${value.listeners.length} записей`, `${backends} выходов`]; if (listenerDelta) changes.push(`${listenerDelta > 0 ? "+" : ""}${listenerDelta} записей`); if (backendDelta) changes.push(`${backendDelta > 0 ? "+" : ""}${backendDelta} выходов`); if (value.health_check.enabled !== current.health_check.enabled) changes.push(`health-check ${value.health_check.enabled ? "включён" : "выключен"}`); return changes.join(" · ") }

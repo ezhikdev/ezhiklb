@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-beta.3"
+const version = "0.1.0-beta.3.1"
 
 type client struct {
 	baseURL string
@@ -106,12 +106,14 @@ func main() {
 		restoreNeedsProfile = false
 		lastUpdateTarget = desired.UpdateVersion
 		if desired.UpdateVersion != "" && desired.UpdateVersion != version {
-			updateState, updateError = "updating", ""
+			updateState, updateError = "requested", ""
 			report()
 			updateCtx, cancelUpdate := context.WithTimeout(ctx, 3*time.Minute)
-			err := agent.InstallAgentUpdate(updateCtx, desired.UpdateVersion)
+			err := agent.InstallAgentUpdate(updateCtx, desired.UpdateVersion, func(stage string) { updateState = stage; report() })
 			cancelUpdate()
 			if err != nil { updateState, updateError = "error", err.Error(); logger.Error("update agent", "version", desired.UpdateVersion, "error", err); return true }
+			updateState = "restarting"
+			report()
 			logger.Info("agent update installed", "version", desired.UpdateVersion)
 			_, err = runner.Run(context.Background(), "systemctl", []string{"restart", "ezhiklb-agent.service"}, "")
 			if err != nil { updateState, updateError = "error", err.Error(); return true }

@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v0.1.0-beta.3` and download the generated
-   `ezhiklb_0.1.0-beta.3_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v0.1.0-beta.3.1` and download the generated
+   `ezhiklb_0.1.0-beta.3.1_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -104,3 +104,9 @@ Run these only on disposable test VPS nodes.
 24. Add a backend whose address equals a node's own IP/observed address and verify the profile editor shows a non-blocking warning without preventing publish.
 25. Close a profile or listener editor with unsaved changes, delete a routing entry and roll back a profile revision, and confirm every one of these now uses the panel's own confirmation dialog (no browser-native confirm popup).
 26. Compare a local node's row against a remote node's row and verify both action-button groups line up at the same horizontal positions.
+
+## Beta.3.1 acceptance checks
+
+27. Ensure the target node's currently installed agent is `beta.3` or newer (reinstall once via the classic command if it predates the self-update trigger), then click "Обновить" and verify an orange progress bar appears under the node row and visibly advances through downloading/verifying/installing/restarting stages (cross-check timestamps against `sudo journalctl -u ezhiklb-agent`). Verify the update button itself is hidden while the bar is visible.
+28. Verify the completion toast (green) or failure toast (red) appears only once the node's own reported state actually reaches `completed`/`error` — not immediately after clicking the confirm dialog.
+29. Hover over each of the four Overview charts and verify a tooltip follows the pointer showing the exact time and per-series value, with a crosshair and per-series dot on the line; verify it also works via a single tap on a touch device.
