@@ -2,7 +2,7 @@
 
 **EzhikLB (Ezhik Load Balancer)** — панель управления TCP- и UDP-балансировкой на Linux. Панель хранит профили, а агенты на нодах применяют их через IPVS в ядре Linux.
 
-Текущая версия: **0.1.0-alpha.8 pre-release**.
+Текущая версия: **0.1.0-alpha.8.1 pre-release**.
 
 ## Что уже работает
 
@@ -30,10 +30,10 @@
 Команда одинакова для панели и ноды. После запуска установщик сам предложит выбрать вариант:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-alpha.8 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-alpha.8.1 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
-> Команда заработает после публикации тега `v0.1.0-alpha.8`. Ошибка `404` означает, что архив pre-release ещё не собран.
+> Команда заработает после публикации тега `v0.1.0-alpha.8.1`. Ошибка `404` означает, что архив pre-release ещё не собран.
 
 Меню установщика:
 
@@ -44,10 +44,10 @@ sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_ver
 ```
 
 - **Панель** — web-интерфейс на порту `8080` и отдельный API нод на `8081`.
-- **Нода** — агент IPVS. Установщик запросит адрес API нод, ID и токен.
+- **Нода** — агент IPVS. При первой установке готовая команда из панели уже передаёт адрес API, ID и токен.
 - **Панель + локальная нода** — оба компонента на одном VPS.
 
-Повторный запуск этой же команды обновляет установленную версию. Настройки и база сохраняются, а перед обновлением создаётся резервная копия.
+Повторный запуск этой же команды обновляет установленную версию. Настройки и база сохраняются, а перед обновлением создаётся резервная копия. Нода автоматически использует сохранённые адрес API, ID и токен — повторно вводить или создавать их не требуется.
 
 ## Как открыть панель
 
@@ -148,7 +148,7 @@ sudo tar --ignore-failed-read -czf "/root/ezhiklb-backup-$(date +%Y%m%d-%H%M%S).
 
 Автоматические копии перед обновлением находятся в `/var/backups/ezhiklb`.
 
-## Проверка `alpha.8` на двух VPS
+## Проверка `alpha.8.1` на двух VPS
 
 На первой VPS установите **Панель** или **Панель + локальная нода** и выберите сетевой доступ. Затем создайте ноду в панели и выполните полученную команду на второй VPS.
 
@@ -167,25 +167,25 @@ sudo systemctl status ezhiklb-agent --no-pager -l && sudo journalctl -u ezhiklb-
 - применение новой ревизии профиля;
 - восстановление агента после перезагрузки VPS.
 
-## Публикация `alpha.8 pre-release`
+## Публикация `alpha.8.1 pre-release`
 
 Сначала загрузите изменённые файлы в `main`, затем создайте тег **обязательно с буквой `v`**:
 
 ```bash
-git tag v0.1.0-alpha.8 && git push origin v0.1.0-alpha.8
+git tag v0.1.0-alpha.8.1 && git push origin v0.1.0-alpha.8.1
 ```
 
 Правильный тег автоматически создаст GitHub Pre-release и два файла:
 
 ```text
-ezhiklb_0.1.0-alpha.8_linux_amd64.tar.gz
-ezhiklb_0.1.0-alpha.8_linux_amd64.tar.gz.sha256
+ezhiklb_0.1.0-alpha.8.1_linux_amd64.tar.gz
+ezhiklb_0.1.0-alpha.8.1_linux_amd64.tar.gz.sha256
 ```
 
-Тег `0.1.0-alpha.8` без `v` workflow не запускает.
+Тег `0.1.0-alpha.8.1` без `v` workflow не запускает.
 
 ## Статус проекта
 
-`alpha.8` добавляет отдельный API-порт для нод, управление портами из web, новый мастер подключения, автоматический IP и uptime, упрощённые действия и статистику по нодам. Перед beta нужно завершить длительные тесты нескольких нод, TCP/UDP, health-check, обновления и восстановления после перезагрузки.
+`alpha.8.1` включает возможности `alpha.8` и исправляет обновление существующих нод: установщик повторно использует сохранённые адрес API, ID и токен без нового подключения к панели. Перед beta нужно завершить длительные тесты нескольких нод, TCP/UDP, health-check, обновления и восстановления после перезагрузки.
 
 Подробности: [`docs/ROADMAP.md`](docs/ROADMAP.md) и [`docs/TESTING.md`](docs/TESTING.md).
