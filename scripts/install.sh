@@ -77,6 +77,23 @@ choose_role() {
 choose_role
 case "$ROLE" in panel|node|panel-node) ;; *) die "EZHIKLB_ROLE must be panel, node, or panel-node" ;; esac
 
+load_existing_env_value() {
+  local key="$1" value=""
+  [[ -f "$ENV_FILE" ]] || return 0
+  [[ -z "${!key:-}" ]] || return 0
+  value="$(sed -n "s/^${key}=//p" "$ENV_FILE" | tail -n 1 | tr -d '\r')"
+  [[ -n "$value" ]] || return 0
+  printf -v "$key" '%s' "$value"
+  export "$key"
+}
+
+if [[ -n "$EXISTING_VERSION" ]]; then
+  load_existing_env_value EZHIKLB_PANEL_URL
+  load_existing_env_value EZHIKLB_NODE_ID
+  load_existing_env_value EZHIKLB_AGENT_TOKEN
+  load_existing_env_value EZHIKLB_ALLOW_INSECURE
+fi
+
 panel_host="${EZHIKLB_HOST:-127.0.0.1}"
 if [[ -z "$EXISTING_VERSION" && ( "$ROLE" == "panel" || "$ROLE" == "panel-node" ) && -z "${EZHIKLB_HOST:-}" ]]; then
   printf '\nКак открыть панель?\n'
