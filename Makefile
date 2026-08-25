@@ -1,4 +1,4 @@
-VERSION ?= 0.1.0-alpha.8
+VERSION ?= 0.1.0-alpha.8.1
 DIST := $(CURDIR)/dist
 
 .PHONY: build web clean bundle

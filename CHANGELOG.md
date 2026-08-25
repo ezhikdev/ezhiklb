@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-alpha.8.1
+
+- Fixed reinstalling or re-enrolling an existing node VPS so the supplied panel URL, node ID and credential replace stale values in the persisted environment.
+- Fixed ordinary node upgrades so saved enrollment values are reused without asking for the ID and credential again.
+- Increased the installation-command viewport and separated its text from the horizontal scrollbar.
+- Replaced the enrollment radar with a clear animated panel-to-node connection path and simplified the waiting copy.
+
 ## 0.1.0-alpha.8
 
 - Split the administrator panel and node-agent API onto configurable ports, defaulting to `8080` and `8081`.

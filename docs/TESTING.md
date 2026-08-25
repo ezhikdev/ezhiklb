@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v0.1.0-alpha.8` and download the generated
-   `ezhiklb_0.1.0-alpha.8_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v0.1.0-alpha.8.1` and download the generated
+   `ezhiklb_0.1.0-alpha.8.1_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -71,7 +71,7 @@ Installer backups are stored in `/var/backups/ezhiklb/<timestamp>`. The legacy
 `/etc/ezhik-udp/ezhik-udp.conf` file is never modified. If the first agent apply
 fails during migration, the installer stops the new agent and starts the old
 `ezhik-udp.service` again when it had been active before installation.
-## Alpha.8 acceptance checks
+## Alpha.8.1 acceptance checks
 
 Run these only on disposable test VPS nodes.
 
@@ -88,3 +88,4 @@ Run these only on disposable test VPS nodes.
 11. Clone a profile, inspect revision history, roll back an older revision and verify rollback creates a new revision instead of deleting history.
 12. Change the panel and agent ports in Settings, verify the browser redirects after restart, new enrollment commands use the new agent port and both immediately previous ports still accept existing node agents.
 13. Verify automatic IPv4, connection uptime, last heartbeat, apply stage, node details and expandable dashboard routes.
+14. On a VPS with an older node installation, run a newly generated enrollment command and verify `/etc/ezhiklb/ezhiklb.env` receives the new node ID, API URL and credential before the agent starts.

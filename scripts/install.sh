@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-alpha.8"
+EZHIKLB_VERSION="0.1.0-alpha.8.1"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -211,6 +211,13 @@ else
   sed -i "s/^EZHIKLB_ROLE=.*/EZHIKLB_ROLE=${ROLE}/" "$ENV_FILE"
   grep -q '^EZHIKLB_AGENT_HOST=' "$ENV_FILE" || printf 'EZHIKLB_AGENT_HOST=0.0.0.0\n' >>"$ENV_FILE"
   grep -q '^EZHIKLB_AGENT_PORT=' "$ENV_FILE" || printf 'EZHIKLB_AGENT_PORT=8081\n' >>"$ENV_FILE"
+  if [[ "$ROLE" == "node" ]]; then
+    sed -i '/^EZHIKLB_PANEL_URL=/d;/^EZHIKLB_NODE_ID=/d;/^EZHIKLB_AGENT_TOKEN=/d;/^EZHIKLB_ALLOW_INSECURE=/d' "$ENV_FILE"
+    printf 'EZHIKLB_PANEL_URL=%s\n' "$EZHIKLB_PANEL_URL" >>"$ENV_FILE"
+    printf 'EZHIKLB_NODE_ID=%s\n' "$EZHIKLB_NODE_ID" >>"$ENV_FILE"
+    printf 'EZHIKLB_AGENT_TOKEN=%s\n' "$EZHIKLB_AGENT_TOKEN" >>"$ENV_FILE"
+    printf 'EZHIKLB_ALLOW_INSECURE=%s\n' "${EZHIKLB_ALLOW_INSECURE:-0}" >>"$ENV_FILE"
+  fi
 fi
 
 if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then

@@ -1,4 +1,4 @@
-import { Activity, Boxes, CheckCircle2, ChevronDown, ChevronRight, CircleGauge, Clock3, Copy, HeartPulse, Hexagon, History, LoaderCircle, LogOut, Network, Pencil, Plus, Power, RefreshCw, Save, Server, Settings, ShieldCheck, Trash2, Wifi } from "lucide-react"
+import { Activity, Boxes, CheckCircle2, ChevronDown, ChevronRight, CircleGauge, Clock3, Copy, HeartPulse, Hexagon, History, LoaderCircle, LogOut, Network, Pencil, Plus, Power, RefreshCw, Save, Server, Settings, ShieldCheck, Trash2 } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
 import { ApiError, api } from "./lib/api"
 import type { BackendHealth, NodeInfo, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "./types"
@@ -13,7 +13,7 @@ const nav = [
 ] as const
 
 const emptyConfig = (): ProfileConfig => ({ schema_version: 1, health_check: { enabled: true, interval_seconds: 10, timeout_millis: 1000, failure_threshold: 3, recovery_threshold: 2 }, listeners: [] })
-const releaseVersion = "0.1.0-alpha.8"
+const releaseVersion = "0.1.0-alpha.8.1"
 const shellArg = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`
 
 export default function App() {
@@ -166,7 +166,7 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
           <Field label="Адрес API нод" hint="Адрес должен быть доступен с новой VPS; по умолчанию используется отдельный порт агентов" error={agentURL && !agentURLValid ? "Укажите полный адрес с http:// или https://" : ""}><Input className="input mono" value={agentURL} onChange={(event) => { setAgentURL(event.target.value); setCopied(false) }} /></Field>
           <div><span className="field__label">Команда установки</span><div className="command-line mono" tabIndex={0} title="Прокрутите строку по горизонтали"><code>{installCommand}</code></div><Button className="copy-command" variant="secondary" disabled={!installCommand} onClick={() => { void copyInstallCommand() }}><Copy data-icon="inline-start" />{copied ? "Скопировано" : "Копировать команду"}</Button></div>
           <div className={`connection-state ${liveCredentialNode?.status === "online" && !liveCredentialNode?.last_error ? "connection-state--ready" : liveCredentialNode?.last_error ? "connection-state--error" : ""}`}>
-            {liveCredentialNode?.status === "online" && !liveCredentialNode?.last_error ? <div className="connection-success"><CheckCircle2 /><div><strong>Нода подключена</strong><span>{liveCredentialNode.observed_address || "IPv4 определён"} · профиль применён</span></div></div> : liveCredentialNode?.last_error ? <div className="connection-success"><Activity /><div><strong>Нода подключена, но конфигурация не применилась</strong><span>{liveCredentialNode.last_error}</span></div></div> : <div className="connection-wait"><div className="connection-radar"><span /><span /><Wifi /></div><div><strong>Ожидаем подключение</strong><span>Проверяем heartbeat каждые 3 секунды</span></div></div>}
+            {liveCredentialNode?.status === "online" && !liveCredentialNode?.last_error ? <div className="connection-success"><CheckCircle2 /><div><strong>Нода подключена</strong><span>{liveCredentialNode.observed_address || "IPv4 определён"} · профиль применён</span></div></div> : liveCredentialNode?.last_error ? <div className="connection-success"><Activity /><div><strong>Нода подключена, но конфигурация не применилась</strong><span>{liveCredentialNode.last_error}</span></div></div> : <div className="connection-wait"><div className="connection-route" aria-hidden="true"><span className="connection-endpoint"><Server /></span><span className="connection-track"><i /><i /></span><span className="connection-endpoint"><ShieldCheck /></span></div><div><strong>Ожидаем подключение ноды</strong><span>Завершите установку на VPS — статус обновится автоматически.</span></div></div>}
           </div>
         </div>
         <div className="dialog__footer"><Button variant="secondary" onClick={() => { if (liveCredentialNode?.status === "online") setSelectedNode(liveCredentialNode); setAdding(false); setCredential(null) }}>{liveCredentialNode?.status === "online" ? "Открыть ноду" : "Закрыть"}</Button></div>

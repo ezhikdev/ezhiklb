@@ -200,21 +200,28 @@ h3 { font-size: 15px; }
 .credential-warning strong, .credential-warning span { display: block; }
 .credential-warning span { margin-top: 4px; color: var(--muted); font-size: 13px; }
 .command-box { width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: 9px; background: #070809; color: var(--foreground); padding: 12px; font-size: 13px; line-height: 1.55; }
-.command-line { width: 100%; height: 48px; margin-top: 7px; overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 9px; background: #070809; color: var(--foreground); padding: 13px 14px; scrollbar-width: thin; }
-.command-line code { display: block; width: max-content; min-width: 100%; white-space: nowrap; }
+.command-line { width: 100%; height: 68px; margin-top: 8px; overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 9px; background: #070809; color: var(--foreground); padding: 14px 14px 24px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.command-line::-webkit-scrollbar { height: 8px; }
+.command-line::-webkit-scrollbar-track { background: transparent; }
+.command-line::-webkit-scrollbar-thumb { border: 2px solid #070809; border-radius: 999px; background: var(--border-strong); }
+.command-line code { display: block; width: max-content; min-width: 100%; line-height: 20px; white-space: nowrap; }
 .copy-command { width: 100%; margin-top: 9px; }
 .connection-state { min-height: 112px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 11px; background: rgba(255,255,255,.018); padding: 18px; transition: border-color .24s ease, background-color .24s ease; }
 .connection-state--ready { border-color: rgba(101,199,149,.3); background: rgba(101,199,149,.055); }
 .connection-state--error { border-color: rgba(223,115,115,.28); background: rgba(223,115,115,.05); }
 .connection-wait, .connection-success { display: flex; align-items: center; gap: 16px; }
+.connection-wait { width: min(330px, 100%); flex-direction: column; gap: 14px; text-align: center; }
 .connection-wait strong, .connection-wait span, .connection-success strong, .connection-success span { display: block; }
 .connection-wait span, .connection-success span { margin-top: 4px; color: var(--muted); font-size: 13px; }
 .connection-success > svg { width: 36px; height: 36px; color: var(--success); animation: success-enter .32s ease both; }
 .connection-state--error .connection-success > svg { color: var(--danger); }
-.connection-radar { position: relative; width: 48px; height: 48px; flex: 0 0 48px; display: grid; place-items: center; color: var(--accent); }
-.connection-radar > span { position: absolute; inset: 8px; border: 1px solid rgba(231,227,220,.34); border-radius: 50%; animation: radar-pulse 1.8s ease-out infinite; }
-.connection-radar > span:nth-child(2) { animation-delay: .6s; }
-.connection-radar > svg { width: 20px; height: 20px; }
+.connection-route { width: 230px; display: grid; grid-template-columns: 42px 1fr 42px; align-items: center; }
+.connection-endpoint { width: 42px; height: 42px; display: grid !important; place-items: center; margin: 0 !important; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--surface-raised); color: var(--muted); animation: endpoint-breathe 2.4s ease-in-out infinite; }
+.connection-endpoint:last-child { animation-delay: 1.2s; }
+.connection-endpoint svg { width: 18px; height: 18px; }
+.connection-track { position: relative; height: 1px; display: block !important; margin: 0 !important; overflow: visible; background: var(--border-strong); }
+.connection-track i { position: absolute; top: 50%; left: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px rgba(231,227,220,.65); opacity: 0; transform: translate(-50%, -50%); animation: connection-travel 1.8s ease-in-out infinite; }
+.connection-track i:nth-child(2) { animation-delay: .9s; }
 
 .settings-network-card { padding: 22px; }
 .settings-network-card .form-grid { margin-bottom: 18px; }
@@ -345,7 +352,8 @@ h3 { font-size: 15px; }
 @keyframes backdrop-enter { from { opacity: 0; } }
 @keyframes dialog-enter { from { opacity: 0; transform: translateY(8px) scale(.99); } }
 @keyframes dropdown-enter { from { opacity: 0; transform: translateY(-4px); } }
-@keyframes radar-pulse { 0% { opacity: .7; transform: scale(.55); } 75%, 100% { opacity: 0; transform: scale(1.45); } }
+@keyframes connection-travel { 0% { left: 0; opacity: 0; } 15%, 75% { opacity: 1; } 100% { left: 100%; opacity: 0; } }
+@keyframes endpoint-breathe { 50% { border-color: rgba(231,227,220,.28); color: var(--foreground); } }
 @keyframes success-enter { from { opacity: 0; transform: scale(.6) rotate(-14deg); } }
 @keyframes breathe { 50% { opacity: .4; transform: scale(.92); } }
 @keyframes spin { to { transform: rotate(360deg); } }
