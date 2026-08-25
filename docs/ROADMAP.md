@@ -34,7 +34,7 @@ Remote enrollment supports HTTPS and explicitly enabled HTTP. The panel adds the
 
 ## Beta gate
 
-Alpha.8.1 is the node-management release with the enrollment upgrade hotfix. A beta tag requires all of the following on disposable VPS infrastructure:
+Alpha.8.2 is the node-management release with the enrollment upgrade hotfix. A beta tag requires all of the following on disposable VPS infrastructure:
 
 1. Panel upgrade with database preservation and rollback verified.
 2. At least two remote nodes connected over the configured HTTP/HTTPS transport for 72 hours without reconciliation drift; public HTTPS must also be tested before beta.

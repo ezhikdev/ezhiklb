@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.8.1
+## 0.1.0-alpha.8.2
 
 - Fixed reinstalling or re-enrolling an existing node VPS so the supplied panel URL, node ID and credential replace stale values in the persisted environment.
 - Fixed ordinary node upgrades so saved enrollment values are reused without asking for the ID and credential again.

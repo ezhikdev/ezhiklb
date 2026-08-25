@@ -2,7 +2,7 @@
 
 **EzhikLB (Ezhik Load Balancer)** — панель управления TCP- и UDP-балансировкой на Linux. Панель хранит профили, а агенты на нодах применяют их через IPVS в ядре Linux.
 
-Текущая версия: **0.1.0-alpha.8.1 pre-release**.
+Текущая версия: **0.1.0-alpha.8.2 pre-release**.
 
 ## Что уже работает
 
@@ -30,10 +30,10 @@
 Команда одинакова для панели и ноды. После запуска установщик сам предложит выбрать вариант:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-alpha.8.1 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=0.1.0-alpha.8.2 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
-> Команда заработает после публикации тега `v0.1.0-alpha.8.1`. Ошибка `404` означает, что архив pre-release ещё не собран.
+> Команда заработает после публикации тега `v0.1.0-alpha.8.2`. Ошибка `404` означает, что архив pre-release ещё не собран.
 
 Меню установщика:
 
@@ -148,7 +148,7 @@ sudo tar --ignore-failed-read -czf "/root/ezhiklb-backup-$(date +%Y%m%d-%H%M%S).
 
 Автоматические копии перед обновлением находятся в `/var/backups/ezhiklb`.
 
-## Проверка `alpha.8.1` на двух VPS
+## Проверка `alpha.8.2` на двух VPS
 
 На первой VPS установите **Панель** или **Панель + локальная нода** и выберите сетевой доступ. Затем создайте ноду в панели и выполните полученную команду на второй VPS.
 
@@ -167,25 +167,25 @@ sudo systemctl status ezhiklb-agent --no-pager -l && sudo journalctl -u ezhiklb-
 - применение новой ревизии профиля;
 - восстановление агента после перезагрузки VPS.
 
-## Публикация `alpha.8.1 pre-release`
+## Публикация `alpha.8.2 pre-release`
 
 Сначала загрузите изменённые файлы в `main`, затем создайте тег **обязательно с буквой `v`**:
 
 ```bash
-git tag v0.1.0-alpha.8.1 && git push origin v0.1.0-alpha.8.1
+git tag v0.1.0-alpha.8.2 && git push origin v0.1.0-alpha.8.2
 ```
 
 Правильный тег автоматически создаст GitHub Pre-release и два файла:
 
 ```text
-ezhiklb_0.1.0-alpha.8.1_linux_amd64.tar.gz
-ezhiklb_0.1.0-alpha.8.1_linux_amd64.tar.gz.sha256
+ezhiklb_0.1.0-alpha.8.2_linux_amd64.tar.gz
+ezhiklb_0.1.0-alpha.8.2_linux_amd64.tar.gz.sha256
 ```
 
-Тег `0.1.0-alpha.8.1` без `v` workflow не запускает.
+Тег `0.1.0-alpha.8.2` без `v` workflow не запускает.
 
 ## Статус проекта
 
-`alpha.8.1` включает возможности `alpha.8` и исправляет обновление существующих нод: установщик повторно использует сохранённые адрес API, ID и токен без нового подключения к панели. Перед beta нужно завершить длительные тесты нескольких нод, TCP/UDP, health-check, обновления и восстановления после перезагрузки.
+`alpha.8.2` включает возможности `alpha.8` и исправляет повторную установку и переподключение существующей VPS-ноды: новые адрес API, ID и токен заменяют старые значения агента. Также улучшены строка команды и состояние ожидания подключения в панели. Перед beta нужно завершить длительные тесты нескольких нод, TCP/UDP, health-check, обновления и восстановления после перезагрузки.
 
 Подробности: [`docs/ROADMAP.md`](docs/ROADMAP.md) и [`docs/TESTING.md`](docs/TESTING.md).
