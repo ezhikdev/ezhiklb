@@ -60,11 +60,23 @@ export interface NodeInfo {
   desired_revision: number
   applied_revision: number
   agent_version: string
-  status: "connecting" | "online" | "offline" | "error" | "disabled"
-  apply_state: "waiting" | "applying" | "applied" | "error" | "disabled"
+  status: "connecting" | "online" | "offline" | "error" | "disabled" | "deleting"
+  apply_state: "waiting" | "applying" | "applied" | "error" | "disabled" | "decommissioning"
   last_seen_at?: string
   online_since?: string
   last_error?: string
+  metrics?: NodeMetrics
+}
+
+export interface NodeMetrics {
+  ram_used_percent: number
+  cpu_used_percent: number
+  load_1: number
+  cpu_cores: number
+  network_rx_bps: number
+  network_tx_bps: number
+  active_ips: number
+  collected_at: string
 }
 
 export interface SystemSettings {

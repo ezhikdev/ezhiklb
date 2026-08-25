@@ -135,6 +135,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"observed_address", `TEXT NOT NULL DEFAULT ''`},
 		{"apply_state", `TEXT NOT NULL DEFAULT 'waiting'`},
 		{"online_since", `TEXT`},
+		{"ram_used_percent", `REAL NOT NULL DEFAULT 0`},
+		{"cpu_used_percent", `REAL NOT NULL DEFAULT 0`},
+		{"load_1", `REAL NOT NULL DEFAULT 0`},
+		{"cpu_cores", `INTEGER NOT NULL DEFAULT 0`},
+		{"network_rx_bps", `INTEGER NOT NULL DEFAULT 0`},
+		{"network_tx_bps", `INTEGER NOT NULL DEFAULT 0`},
+		{"active_ips", `INTEGER NOT NULL DEFAULT 0`},
+		{"metrics_collected_at", `TEXT`},
 	} {
 		if err := s.ensureColumn(ctx, "nodes", column.name, column.definition); err != nil {
 			return err
@@ -394,9 +402,9 @@ func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		if node.Status != "disabled" && node.LastSeenAt == nil {
+		if node.Status != "disabled" && node.Status != "deleting" && node.LastSeenAt == nil {
 			node.Status = "connecting"
-		} else if node.Status != "disabled" && time.Since(*node.LastSeenAt) > 45*time.Second {
+		} else if node.Status != "disabled" && node.Status != "deleting" && time.Since(*node.LastSeenAt) > 45*time.Second {
 			node.Status = "offline"
 			node.OnlineSince = nil
 		}
@@ -483,11 +491,11 @@ func (s *Store) UpdateNode(ctx context.Context, nodeID, name, ingressAddress str
 
 func (s *Store) DeleteNode(ctx context.Context, nodeID string) error {
 	if nodeID == "local" { return errors.New("local node cannot be deleted") }
-	result, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, nodeID)
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET status='deleting',apply_state='decommissioning',last_error='',updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), nodeID)
 	if err != nil { return err }
 	affected, _ := result.RowsAffected()
 	if affected == 0 { return ErrNotFound }
-	return s.Audit(ctx, "node.deleted", "node", nodeID, map[string]any{})
+	return s.Audit(ctx, "node.decommission_requested", "node", nodeID, map[string]any{})
 }
 
 func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) error {
@@ -513,12 +521,12 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 	var result domain.NodeDesiredState
 	var configJSON string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),r.config_json
+		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.status='deleting',r.config_json
 		FROM nodes n
 		JOIN profiles p ON p.id=n.profile_id
 		JOIN profile_revisions r ON r.profile_id=p.id AND r.number=n.desired_revision
 		LEFT JOIN node_probe_requests q ON q.node_id=n.id
-		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &configJSON)
+		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.Decommission, &configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrNotFound
 	}
@@ -542,7 +550,7 @@ func (s *Store) RequestHealthProbe(ctx context.Context, nodeID string) (int64, e
 	return nonce, nil
 }
 
-func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat) error {
+func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, decommissioned bool) error {
 	status := "online"
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -557,6 +565,15 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	} else if err != nil {
 		return err
 	}
+	if decommissioned && previousStatus == "deleting" {
+		if err := auditTx(ctx, tx, "node.decommissioned", "node", nodeID, map[string]any{"agent_version": version}); err != nil { return err }
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, nodeID); err != nil { return err }
+		return tx.Commit()
+	}
+	if previousStatus == "deleting" {
+		status = "deleting"
+		applyState = "decommissioning"
+	}
 	onlineSince := previousOnline.String
 	if !previousOnline.Valid || !previousSeen.Valid || previousStatus == "offline" || previousStatus == "connecting" {
 		onlineSince = formatTime(now)
@@ -566,8 +583,10 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	if applyState == "" {
 		if applyError != "" { applyState = "error" } else if applied > 0 { applyState = "applied" } else { applyState = "waiting" }
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,updated_at=? WHERE id=? AND status<>'disabled'`,
-		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, formatTime(now), nodeID)
+	metricsAt := formatTime(metrics.CollectedAt)
+	if metrics.CollectedAt.IsZero() { metricsAt = formatTime(now) }
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,updated_at=? WHERE id=? AND status<>'disabled'`,
+		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, formatTime(now), nodeID)
 	if err != nil {
 		return err
 	}
@@ -678,13 +697,14 @@ func (s *Store) getRevision(ctx context.Context, profileID string, number int64)
 	return r, err
 }
 
-const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,created_at,updated_at FROM nodes`
+const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,created_at,updated_at FROM nodes`
 
 func scanNode(row scanner) (domain.Node, error) {
 	var n domain.Node
-	var lastSeen, onlineSince sql.NullString
+	var lastSeen, onlineSince, metricsAt sql.NullString
 	var created, updated string
-	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &created, &updated)
+	var metrics domain.NodeMetrics
+	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &created, &updated)
 	if err != nil {
 		return n, err
 	}
@@ -699,6 +719,12 @@ func scanNode(row scanner) (domain.Node, error) {
 		parsed, parseErr := parseTime(onlineSince.String)
 		if parseErr != nil { return n, parseErr }
 		n.OnlineSince = &parsed
+	}
+	if metricsAt.Valid && metricsAt.String != "" {
+		parsed, parseErr := parseTime(metricsAt.String)
+		if parseErr != nil { return n, parseErr }
+		metrics.CollectedAt = parsed
+		n.Metrics = &metrics
 	}
 	n.CreatedAt, err = parseTime(created)
 	if err == nil {

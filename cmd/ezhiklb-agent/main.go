@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-alpha.8.2"
+const version = "0.1.0-beta.1"
 
 type client struct {
 	baseURL string
@@ -46,6 +46,7 @@ func main() {
 	runner := agent.ExecRunner{}
 	reconciler := agent.NewReconciler(runner, env("EZHIKLB_AGENT_STATE", "/var/lib/ezhiklb-agent/state.json"), logger)
 	monitor := agent.NewHealthMonitor(runner, reconciler, logger)
+	metricsCollector := agent.NewMetricsCollector()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -59,15 +60,20 @@ func main() {
 	applyState := "connecting"
 	var healthCancel context.CancelFunc
 	var healthMu sync.Mutex
+	var metrics domain.NodeMetrics
+	var decommissioned bool
 
-	report := func() {
+	report := func() bool {
 		stats, err := agent.CollectIPVSStats(ctx, runner)
 		if err != nil {
 			logger.Warn("collect IPVS stats", "error", err)
 		}
-		if err := api.heartbeat(ctx, nodeID, applied, applyError, applyState, monitor.Results(), stats); err != nil {
+		if collected, collectErr := metricsCollector.Collect(); collectErr != nil { logger.Warn("collect system metrics", "error", collectErr) } else { metrics = collected }
+		if err := api.heartbeat(ctx, nodeID, applied, applyError, applyState, monitor.Results(), stats, metrics, decommissioned); err != nil {
 			logger.Error("send heartbeat", "error", err)
+			return false
 		}
+		return true
 	}
 	reconcile := func() bool {
 		desired, changed, err := api.desired(ctx, nodeID, applied, lastHealthProbe)
@@ -77,6 +83,14 @@ func main() {
 		}
 		if !changed {
 			return false
+		}
+		if desired.Decommission {
+			applyState = "decommissioning"
+			if err := reconciler.Decommission(ctx); err != nil { applyError = err.Error(); applyState = "error"; logger.Error("decommission node", "error", err); return true }
+			applyError = ""
+			decommissioned = true
+			logger.Info("node decommission completed")
+			return true
 		}
 		probeRequested := desired.HealthProbe != lastHealthProbe
 		lastHealthProbe = desired.HealthProbe
@@ -114,7 +128,11 @@ func main() {
 	}
 
 	reconcile()
-	report()
+	reported := report()
+	if decommissioned && reported {
+		_, _ = runner.Run(context.Background(), "systemctl", []string{"disable", "ezhiklb-agent.service"}, "")
+		return
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -126,7 +144,11 @@ func main() {
 			return
 		case <-desiredPoll.C:
 			if reconcile() {
-				report()
+				reported := report()
+				if decommissioned && reported {
+					_, _ = runner.Run(context.Background(), "systemctl", []string{"disable", "ezhiklb-agent.service"}, "")
+					return
+				}
 			}
 		case <-heartbeatPoll.C:
 			report()
@@ -160,8 +182,8 @@ func (c *client) desired(ctx context.Context, nodeID string, knownRevision, know
 	return result, true, nil
 }
 
-func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError, applyState string, health []domain.BackendHealth, stats []domain.ServiceStat) error {
-	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "apply_state": applyState, "health": health, "stats": stats})
+func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError, applyState string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, decommissioned bool) error {
+	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "apply_state": applyState, "health": health, "stats": stats, "metrics": metrics, "decommissioned": decommissioned})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/agent/v1/nodes/"+nodeID+"/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return err

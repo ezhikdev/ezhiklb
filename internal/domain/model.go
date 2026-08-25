@@ -93,8 +93,20 @@ type Node struct {
 	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
 	OnlineSince     *time.Time `json:"online_since,omitempty"`
 	LastError       string     `json:"last_error,omitempty"`
+	Metrics         *NodeMetrics `json:"metrics,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type NodeMetrics struct {
+	RAMUsedPercent float64   `json:"ram_used_percent"`
+	CPUUsedPercent float64   `json:"cpu_used_percent"`
+	Load1          float64   `json:"load_1"`
+	CPUCores       int       `json:"cpu_cores"`
+	NetworkRxBPS   uint64    `json:"network_rx_bps"`
+	NetworkTxBPS   uint64    `json:"network_tx_bps"`
+	ActiveIPs      int       `json:"active_ips"`
+	CollectedAt    time.Time `json:"collected_at"`
 }
 
 type SystemSettings struct {
@@ -111,6 +123,7 @@ type NodeDesiredState struct {
 	ProfileID       string        `json:"profile_id"`
 	ProfileName     string        `json:"profile_name"`
 	HealthProbe     int64         `json:"health_probe"`
+	Decommission    bool          `json:"decommission"`
 	Config          ProfileConfig `json:"config"`
 }
 

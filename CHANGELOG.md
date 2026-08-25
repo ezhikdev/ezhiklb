@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-beta.1
+
+- Added lightweight one-minute node telemetry for RAM, CPU, load average, network throughput and unique active client IPs.
+- Added compact live node cards with resource meters, traffic rates, connection uptime and an accessible online pulse.
+- Changed remote-node deletion into an acknowledged decommission flow that removes managed IPVS/firewall state and disables the agent before the panel forgets the node.
+- Added a persistent `deleting` state for offline nodes so cleanup resumes when they reconnect.
+- Allowed ordinary upgrades of already enrolled nodes while the panel is temporarily unavailable; strict first-revision verification remains enabled for new and replacement enrollment.
+- Changed the agent unit to restart only on failure so a completed decommission can stop it cleanly.
+
 ## 0.1.0-alpha.8.2
 
 - Fixed reinstalling or re-enrolling an existing node VPS so the supplied panel URL, node ID and credential replace stale values in the persisted environment.

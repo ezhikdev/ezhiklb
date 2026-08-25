@@ -32,9 +32,9 @@ Remote enrollment supports HTTPS and explicitly enabled HTTP. The panel adds the
 5. Simplified edit, enable/disable and delete actions — implemented.
 6. Node detail view and expandable per-node IPVS distribution — implemented.
 
-## Beta gate
+## Beta.1 — production-readiness
 
-Alpha.8.2 is the node-management release with the enrollment upgrade hotfix. A beta tag requires all of the following on disposable VPS infrastructure:
+Beta.1 adds lightweight node telemetry, acknowledged decommission and panel-independent upgrades for existing agents. Promotion beyond beta.1 requires all of the following on disposable VPS infrastructure:
 
 1. Panel upgrade with database preservation and rollback verified.
 2. At least two remote nodes connected over the configured HTTP/HTTPS transport for 72 hours without reconciliation drift; public HTTPS must also be tested before beta.

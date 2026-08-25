@@ -75,3 +75,15 @@ After a port change, the immediately previous panel and agent ports can remain
 as agent-only listeners; this bounded pair covers nodes enrolled by both old and
 new releases without exposing another administrator UI. Temporary node
 disablement blocks credential validation without deleting the credential.
+
+## Telemetry and decommission
+
+Beta.1 heartbeat payloads contain a one-minute in-memory aggregate for CPU,
+RAM, load average, host network throughput and unique source addresses seen in
+the IPVS connection table. The panel stores only the latest aggregate, so the
+database does not grow as a time-series store.
+
+Remote-node removal is acknowledged. The panel first marks the node as
+`deleting`; after reconnecting, the agent removes only EzhikLB-managed IPVS
+services and firewall chains, reports completion, disables its systemd unit and
+exits. The credential and node row are removed only after this acknowledgement.

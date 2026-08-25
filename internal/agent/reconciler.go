@@ -131,6 +131,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	return r.saveState(AppliedState{Revision: desired.Revision, Services: services})
 }
 
+// Decommission removes only services and firewall rules managed by EzhikLB.
+// Unrelated IPVS services and host firewall rules remain untouched.
+func (r *Reconciler) Decommission(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old, err := r.loadState()
+	if err != nil { return err }
+	if err := r.applyIPVS(ctx, old.Services, nil); err != nil { return fmt.Errorf("remove IPVS services: %w", err) }
+	if err := r.removeFirewall(ctx); err != nil { return fmt.Errorf("remove EzhikLB firewall rules: %w", err) }
+	return r.saveState(AppliedState{})
+}
+
+func (r *Reconciler) removeFirewall(ctx context.Context) error {
+	for _, rule := range []struct{ table, parent, child string }{{"filter", "FORWARD", "EZHIKLB-FORWARD"}, {"nat", "POSTROUTING", "EZHIKLB-SNAT"}} {
+		prefix := []string{"-w", "5"}
+		if rule.table != "filter" { prefix = append(prefix, "-t", rule.table) }
+		check := append(append([]string{}, prefix...), "-C", rule.parent, "-j", rule.child)
+		if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
+			remove := append(append([]string{}, prefix...), "-D", rule.parent, "-j", rule.child)
+			if _, err := r.runner.Run(ctx, "iptables", remove, ""); err != nil { return err }
+		}
+		flush := append(append([]string{}, prefix...), "-F", rule.child)
+		_, _ = r.runner.Run(ctx, "iptables", flush, "")
+		deleteChain := append(append([]string{}, prefix...), "-X", rule.child)
+		_, _ = r.runner.Run(ctx, "iptables", deleteChain, "")
+	}
+	return nil
+}
+
 func (r *Reconciler) validateLocalAddresses(ctx context.Context, services []Service) error {
 	output, err := r.runner.Run(ctx, "ip", []string{"-o", "-4", "addr", "show"}, "")
 	if err != nil {

@@ -386,6 +386,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	etag := fmt.Sprintf(`"rev-%d-probe-%d"`, state.Revision, state.HealthProbe)
+	if state.Decommission { etag = fmt.Sprintf(`"rev-%d-probe-%d-decommission"`, state.Revision, state.HealthProbe) }
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -402,6 +403,8 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		ApplyState      string `json:"apply_state"`
 		Health          []domain.BackendHealth `json:"health"`
 		Stats           []domain.ServiceStat `json:"stats"`
+		Metrics         domain.NodeMetrics `json:"metrics"`
+		Decommissioned  bool `json:"decommissioned"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -409,7 +412,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	observedAddress := remoteIPv4(r)
 	if r.PathValue("id") == "local" && (observedAddress == "127.0.0.1" || observedAddress == "::1") { observedAddress = "" }
-	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats); errors.Is(err, store.ErrNotFound) {
+	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
 		s.internalError(w, err)
@@ -538,6 +541,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-alpha.8.2"
+const Version = "0.1.0-beta.1"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

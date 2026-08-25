@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v0.1.0-alpha.8.2` and download the generated
-   `ezhiklb_0.1.0-alpha.8.2_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v0.1.0-beta.1` and download the generated
+   `ezhiklb_0.1.0-beta.1_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -71,7 +71,7 @@ Installer backups are stored in `/var/backups/ezhiklb/<timestamp>`. The legacy
 `/etc/ezhik-udp/ezhik-udp.conf` file is never modified. If the first agent apply
 fails during migration, the installer stops the new agent and starts the old
 `ezhik-udp.service` again when it had been active before installation.
-## Alpha.8.2 acceptance checks
+## Beta.1 acceptance checks
 
 Run these only on disposable test VPS nodes.
 
@@ -89,3 +89,6 @@ Run these only on disposable test VPS nodes.
 12. Change the panel and agent ports in Settings, verify the browser redirects after restart, new enrollment commands use the new agent port and both immediately previous ports still accept existing node agents.
 13. Verify automatic IPv4, connection uptime, last heartbeat, apply stage, node details and expandable dashboard routes.
 14. On a VPS with an older node installation, run a newly generated enrollment command and verify `/etc/ezhiklb/ezhiklb.env` receives the new node ID, API URL and credential before the agent starts.
+15. Stop the panel, run the ordinary beta.1 upgrade on an already enrolled node and verify installation succeeds while the agent keeps retrying in the background. Start the panel and verify the node returns online without re-enrollment.
+16. Keep traffic active for at least two heartbeat intervals and verify the node card reports RAM, one-minute CPU/load, receive/transmit rates and unique active IPs without continuously growing the SQLite database.
+17. Delete a remote node while it is online. Verify its managed IPVS services and `EZHIKLB-FORWARD`/`EZHIKLB-SNAT` chains disappear, `ezhiklb-agent.service` becomes disabled and the row disappears from the panel only after acknowledgement. Repeat while the node is offline and verify the `deleting` state completes after reconnecting it.

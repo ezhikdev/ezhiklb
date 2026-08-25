@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-alpha.8.2"
+EZHIKLB_VERSION="0.1.0-beta.1"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -48,10 +48,14 @@ restore_previous_release() {
 [[ "${EUID}" -eq 0 ]] || die "run this installer as root"
 [[ -r /etc/os-release ]] || die "unsupported operating system"
 . /etc/os-release
-case "${ID:-}" in ubuntu|debian) ;; *) die "only Debian and Ubuntu are supported in this alpha" ;; esac
+case "${ID:-}" in ubuntu|debian) ;; *) die "only Debian and Ubuntu are supported in this pre-release" ;; esac
 
 EXISTING_VERSION=""
 [[ -f "$VERSION_FILE" ]] && EXISTING_VERSION="$(<"$VERSION_FILE")"
+RECONNECT_REQUESTED=0
+if [[ -n "${EZHIKLB_PANEL_URL:-}" && -n "${EZHIKLB_NODE_ID:-}" && -n "${EZHIKLB_AGENT_TOKEN:-}" ]]; then
+  RECONNECT_REQUESTED=1
+fi
 
 choose_role() {
   if [[ -n "${EZHIKLB_ROLE:-}" ]]; then
@@ -283,7 +287,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=${ENV_FILE}
 ExecStart=${PREFIX}/bin/ezhiklb-agent
-Restart=always
+Restart=on-failure
 RestartSec=3s
 PrivateTmp=yes
 ProtectHome=yes
@@ -321,28 +325,34 @@ if [[ "$ROLE" == "panel" || "$ROLE" == "panel-node" ]]; then
 fi
 
 if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
-  apply_marker="/run/ezhiklb-agent-install.$$"
-  : >"$apply_marker"
   systemctl enable ezhiklb-agent.service
   systemctl restart ezhiklb-agent.service
-  for _ in {1..30}; do
-    [[ -s "${AGENT_DATA_DIR}/state.json" && "${AGENT_DATA_DIR}/state.json" -nt "$apply_marker" ]] && break
-    sleep 1
-  done
+  sleep 2
   if ! systemctl is-active --quiet ezhiklb-agent.service; then
     systemctl status ezhiklb-agent.service --no-pager || true
     restore_previous_release
     [[ "$legacy_was_active" == "1" ]] && systemctl start ezhik-udp.service || true
     die "agent failed to start; legacy service was restored when applicable"
   fi
-  if [[ ! -s "${AGENT_DATA_DIR}/state.json" || ! "${AGENT_DATA_DIR}/state.json" -nt "$apply_marker" ]]; then
-    journalctl -u ezhiklb-agent.service -n 80 --no-pager || true
-    systemctl stop ezhiklb-agent.service || true
-    restore_previous_release
-    [[ "$legacy_was_active" == "1" ]] && systemctl start ezhik-udp.service || true
-    die "agent did not apply its first revision; legacy service was restored when applicable"
+  if [[ -z "$EXISTING_VERSION" || "$RECONNECT_REQUESTED" == "1" ]]; then
+    apply_marker="/run/ezhiklb-agent-install.$$"
+    : >"$apply_marker"
+    systemctl restart ezhiklb-agent.service
+    for _ in {1..30}; do
+      [[ -s "${AGENT_DATA_DIR}/state.json" && "${AGENT_DATA_DIR}/state.json" -nt "$apply_marker" ]] && break
+      sleep 1
+    done
+    if [[ ! -s "${AGENT_DATA_DIR}/state.json" || ! "${AGENT_DATA_DIR}/state.json" -nt "$apply_marker" ]]; then
+      journalctl -u ezhiklb-agent.service -n 80 --no-pager || true
+      systemctl stop ezhiklb-agent.service || true
+      restore_previous_release
+      [[ "$legacy_was_active" == "1" ]] && systemctl start ezhik-udp.service || true
+      die "agent did not apply its first revision; legacy service was restored when applicable"
+    fi
+    rm -f -- "$apply_marker"
+  else
+    log "Agent updated; panel availability will be checked in the background"
   fi
-  rm -f -- "$apply_marker"
 fi
 
 log "${EZHIKLB_VERSION} installed successfully"
