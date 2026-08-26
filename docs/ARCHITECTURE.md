@@ -94,6 +94,14 @@ The node agent stores only its last successfully applied desired state. At start
 
 SQLite keeps an internal monotonic revision number for reconciliation while operators see a separate immutable profile version label. Automatic mode derives `vN` from the next revision; manual mode accepts only ASCII letters, digits, dots and hyphens and requires a new label for every publication.
 
+An optional profile publication can attach a one-shot connection reset to the new revision.
+The store records that revision only on nodes already assigned to the profile; a successful
+heartbeat acknowledging the revision clears the marker. A `1.0.7+` agent handles it by deleting
+and rebuilding only EzhikLB-owned IPVS services and deleting conntrack entries filtered by the
+affected protocol, VIP and port. It never invokes host-wide `ipvsadm -C` or `conntrack -F`.
+Publication is rejected when any assigned agent is older than `1.0.7`, preventing an older
+JSON client from silently ignoring the reset request.
+
 Audit events are operational history rather than telemetry. They are pruned to a rolling 14-day window during writes and reads; node resource metrics continue to store only the latest aggregate.
 
 ## Node self-update and diagnostics

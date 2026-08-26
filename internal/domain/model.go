@@ -153,15 +153,16 @@ type AuditEvent struct {
 }
 
 type NodeDesiredState struct {
-	NodeID          string        `json:"node_id"`
-	IngressAddress  string        `json:"ingress_address"`
-	Revision        int64         `json:"revision"`
-	ProfileID       string        `json:"profile_id"`
-	ProfileName     string        `json:"profile_name"`
-	HealthProbe     int64         `json:"health_probe"`
-	Decommission    bool          `json:"decommission"`
-	UpdateVersion   string        `json:"update_version,omitempty"`
-	Config          ProfileConfig `json:"config"`
+	NodeID           string        `json:"node_id"`
+	IngressAddress   string        `json:"ingress_address"`
+	Revision         int64         `json:"revision"`
+	ProfileID        string        `json:"profile_id"`
+	ProfileName      string        `json:"profile_name"`
+	HealthProbe      int64         `json:"health_probe"`
+	ResetConnections bool          `json:"reset_connections,omitempty"`
+	Decommission     bool          `json:"decommission"`
+	UpdateVersion    string        `json:"update_version,omitempty"`
+	Config           ProfileConfig `json:"config"`
 }
 
 type BackendHealth struct {

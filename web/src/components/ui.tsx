@@ -27,8 +27,8 @@ export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input className="input" {...props} />
 }
 
-export function Switch({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
-  return <button type="button" role="checkbox" aria-checked={checked} aria-label={label} className={`switch ${checked ? "switch--on" : ""}`} onClick={() => onChange(!checked)}><span aria-hidden="true"><Check /></span></button>
+export function Switch({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (checked: boolean) => void; label: string; disabled?: boolean }) {
+  return <button type="button" role="checkbox" aria-checked={checked} aria-label={label} disabled={disabled} className={`switch ${checked ? "switch--on" : ""}`} onClick={() => onChange(!checked)}><span aria-hidden="true"><Check /></span></button>
 }
 
 export function SelectMenu({ value, options, onChange, label, compact = false }: { value: string; options: { value: string; label: string; description?: string }[]; onChange: (value: string) => void; label: string; compact?: boolean }) {

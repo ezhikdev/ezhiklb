@@ -38,8 +38,8 @@ export const api = {
   profile: (id: string) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`),
   createProfile: (name: string, description: string, config: ProfileConfig, autoVersion = true, version = "") =>
     request<{ profile: Profile; revision: Revision }>("/api/v1/profiles", { method: "POST", body: JSON.stringify({ name, description, config, auto_version: autoVersion, version }) }),
-  publishProfile: (id: string, name: string, description: string, config: ProfileConfig, autoVersion = true, version = "") =>
-    request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`, { method: "PUT", body: JSON.stringify({ name, description, config, auto_version: autoVersion, version }) }),
+  publishProfile: (id: string, name: string, description: string, config: ProfileConfig, autoVersion = true, version = "", resetConnections = false) =>
+    request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`, { method: "PUT", body: JSON.stringify({ name, description, config, auto_version: autoVersion, version, reset_connections: resetConnections }) }),
   revisions: (id: string) => requestArray<Revision>(`/api/v1/profiles/${id}/revisions`),
   rollbackProfile: (id: string, number: number) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}/rollback/${number}`, { method: "POST" }),
   cloneProfile: (id: string, name: string) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),

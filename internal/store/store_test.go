@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -71,11 +72,11 @@ func TestProfileVersionsAndAuditRetention(t *testing.T) {
 	profiles, err := s.ListProfiles(ctx)
 	if err != nil { t.Fatal(err) }
 	if len(profiles) != 1 || profiles[0].Version != "v1" || !profiles[0].AutoVersion { t.Fatalf("unexpected bootstrap profile: %#v", profiles) }
-	profile, revision, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, domain.DefaultProfileConfig(), true, "")
+	profile, revision, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, domain.DefaultProfileConfig(), true, "", false)
 	if err != nil { t.Fatal(err) }
 	if profile.Version != "v2" || revision.Version != "v2" { t.Fatalf("automatic version = %q/%q, want v2", profile.Version, revision.Version) }
-	if _, _, err := s.PublishRevision(ctx, profile.ID, profile.Name, profile.Description, domain.DefaultProfileConfig(), false, "v2"); err == nil { t.Fatal("expected unchanged manual version to fail") }
-	profile, _, err = s.PublishRevision(ctx, profile.ID, profile.Name, profile.Description, domain.DefaultProfileConfig(), false, "vpn-2026.08")
+	if _, _, err := s.PublishRevision(ctx, profile.ID, profile.Name, profile.Description, domain.DefaultProfileConfig(), false, "v2", false); err == nil { t.Fatal("expected unchanged manual version to fail") }
+	profile, _, err = s.PublishRevision(ctx, profile.ID, profile.Name, profile.Description, domain.DefaultProfileConfig(), false, "vpn-2026.08", false)
 	if err != nil { t.Fatal(err) }
 	if profile.Version != "vpn-2026.08" || profile.AutoVersion { t.Fatalf("unexpected manual profile: %#v", profile) }
 
@@ -102,4 +103,27 @@ func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil { t.Fatal(err) }
 	nodes, err = s.ListNodes(ctx); if err != nil { t.Fatal(err) }
 	if nodes[0].UpdateState != "completed" || nodes[0].UpdateTarget != "" { t.Fatalf("completion was not recorded: %#v", nodes[0]) }
+}
+
+func TestPublishedResetIsOneShotAndRequiresCompatibleAgents(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
+	profiles, err := s.ListProfiles(ctx)
+	if err != nil { t.Fatal(err) }
+	if _, _, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, domain.DefaultProfileConfig(), true, "", true); !errors.Is(err, ErrResetUnsupported) {
+		t.Fatalf("old agent reset error = %v, want %v", err, ErrResetUnsupported)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='1.0.7' WHERE id='local'`); err != nil { t.Fatal(err) }
+	_, revision, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, domain.DefaultProfileConfig(), true, "", true)
+	if err != nil { t.Fatal(err) }
+	desired, err := s.DesiredState(ctx, "local")
+	if err != nil { t.Fatal(err) }
+	if !desired.ResetConnections { t.Fatal("published reset was not delivered to assigned node") }
+	if err := s.Heartbeat(ctx, "local", "1.0.7", "", "applied", revision.Number, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil { t.Fatal(err) }
+	desired, err = s.DesiredState(ctx, "local")
+	if err != nil { t.Fatal(err) }
+	if desired.ResetConnections { t.Fatal("acknowledged reset was delivered more than once") }
 }

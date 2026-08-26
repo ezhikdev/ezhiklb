@@ -4,7 +4,7 @@
 
 **EzhikLB (Ezhik Load Balancer)** объединяет панель управления, переиспользуемые профили и удалённые ноды. Трафик обрабатывается IPVS непосредственно в ядре Linux, а панель отвечает за конфигурацию, health-check, наблюдение и обновления.
 
-![Version](https://img.shields.io/badge/version-1.0.6-65c795?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.0.7-65c795?style=flat-square)
 ![Protocols](https://img.shields.io/badge/protocols-TCP%20%2B%20UDP-e7e3dc?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Linux-9fa6b2?style=flat-square)
 
@@ -16,6 +16,7 @@
 - ICMP health-check с автоматическим исключением недоступных адресов;
 - одна панель и несколько удалённых нод;
 - общие профили, версии, история изменений и откат;
+- одноразовый сброс affinity и перераспределение клиентов при публикации профиля;
 - графики RAM, CPU, сети и активных IP;
 - состояние IPVS, firewall и применения конфигурации;
 - обновление подключённых нод одной кнопкой с проверкой SHA-256;
@@ -68,7 +69,7 @@ EzhikLB ориентирован именно на простое управле
 Одна команда запускает интерактивный установщик. Внутри можно выбрать панель, ноду или оба компонента:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=1.0.6 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=1.0.7 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
 Варианты установки:
@@ -122,6 +123,13 @@ ssh -L 8080:127.0.0.1:8080 root@IP_ПАНЕЛИ
 Веса `1 + 1` дают примерно `50% / 50%`, а `2 + 1` — примерно `66% / 33%`. Для VPN и долгоживущих UDP-сессий разумная начальная настройка Affinity — **3 часа**.
 
 ICMP health-check проверяет доступность IP-адреса, но не подтверждает работу конкретного приложения на TCP/UDP-порту.
+
+При публикации существующего профиля можно включить **«Сбросить распределение
+клиентов»**. Назначенные этому профилю ноды один раз пересоздадут только свои
+правила EzhikLB и удалят связанные состояния соединений. Старые affinity-привязки
+исчезнут, и следующие пакеты будут распределены заново. Опция выключена по
+умолчанию: её включение прерывает активные TCP/UDP-сессии и требует версии агента
+`1.0.7` или новее на всех назначенных нодах.
 
 ## Caddy, Docker и существующие сайты
 

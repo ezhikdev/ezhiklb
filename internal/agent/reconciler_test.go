@@ -62,6 +62,23 @@ func TestApplyIPVSNeverClearsGlobalTable(t *testing.T) {
 	}
 }
 
+func TestResetConnectionStateIsScopedToManagedServices(t *testing.T) {
+	runner := &fakeRunner{}
+	r := NewReconciler(runner, filepath.Join(t.TempDir(), "state.json"), nil)
+	service := Service{Protocol: domain.ProtocolUDP, Address: "198.51.100.10", Port: 8002, Scheduler: "wrr", AffinitySecs: 10800, Destinations: []Destination{{ID: "backend", Address: "192.0.2.10", Port: 9000, Weight: 2}}}
+	if err := r.resetConnectionState(context.Background(), []Service{service}, []Service{service}); err != nil { t.Fatal(err) }
+	var deletedService, purgedConntrack, recreatedService bool
+	for _, call := range runner.calls {
+		joined := strings.Join(call.args, " ")
+		if call.name == "ipvsadm" && joined == "-C" { t.Fatal("reset attempted to clear the global IPVS table") }
+		if call.name == "conntrack" && joined == "-F" { t.Fatal("reset attempted to clear the global conntrack table") }
+		if call.name == "ipvsadm" && joined == "-D -u 198.51.100.10:8002" { deletedService = true }
+		if call.name == "conntrack" && joined == "-D -f ipv4 -p udp -d 198.51.100.10 --dport 8002" { purgedConntrack = true }
+		if call.name == "ipvsadm" && strings.HasPrefix(joined, "-A -u 198.51.100.10:8002") { recreatedService = true }
+	}
+	if !deletedService || !purgedConntrack || !recreatedService { t.Fatalf("scoped reset was incomplete: %#v", runner.calls) }
+}
+
 func TestRestoreRebuildsSavedDataPlane(t *testing.T) {
 	runner := &fakeRunner{}
 	r := NewReconciler(runner, filepath.Join(t.TempDir(), "state.json"), nil)

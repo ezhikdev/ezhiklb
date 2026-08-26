@@ -165,11 +165,12 @@ func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 type profilePayload struct {
-	Name        string               `json:"name"`
-	Description string               `json:"description"`
-	AutoVersion *bool                `json:"auto_version"`
-	Version     string               `json:"version"`
-	Config      domain.ProfileConfig `json:"config"`
+	Name             string               `json:"name"`
+	Description      string               `json:"description"`
+	AutoVersion      *bool                `json:"auto_version"`
+	Version          string               `json:"version"`
+	ResetConnections bool                 `json:"reset_connections"`
+	Config           domain.ProfileConfig `json:"config"`
 }
 
 func (p profilePayload) versioning() (bool, string) {
@@ -221,7 +222,7 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	autoVersion, version := payload.versioning()
-	profile, revision, err := s.store.PublishRevision(r.Context(), r.PathValue("id"), strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description), payload.Config, autoVersion, version)
+	profile, revision, err := s.store.PublishRevision(r.Context(), r.PathValue("id"), strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description), payload.Config, autoVersion, version, payload.ResetConnections)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
 		return
@@ -591,6 +592,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "1.0.6"
+const Version = "1.0.7"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

@@ -119,7 +119,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if err := r.applyFirewall(ctx, transitionServices); err != nil {
 		return fmt.Errorf("apply firewall: %w", err)
 	}
-	if err := r.applyIPVS(ctx, old.Services, services); err != nil {
+	if desired.ResetConnections {
+		r.logger.Warn("resetting EzhikLB connection state for published profile", "revision", desired.Revision)
+		if err := r.resetConnectionState(ctx, old.Services, services); err != nil {
+			_ = r.applyFirewall(ctx, old.Services)
+			return fmt.Errorf("reset IPVS connection state: %w", err)
+		}
+	} else if err := r.applyIPVS(ctx, old.Services, services); err != nil {
 		rollbackErr := r.applyIPVS(ctx, services, old.Services)
 		_ = r.applyFirewall(ctx, old.Services)
 		if rollbackErr != nil {
@@ -131,6 +137,47 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 		return fmt.Errorf("finalize firewall: %w", err)
 	}
 	return r.saveState(AppliedState{Revision: desired.Revision, Services: services, HealthCheck: desired.Config.HealthCheck})
+}
+
+// resetConnectionState deliberately interrupts only flows owned by EzhikLB.
+// It never clears the host-wide IPVS or conntrack tables.
+func (r *Reconciler) resetConnectionState(ctx context.Context, oldServices, desiredServices []Service) error {
+	for _, service := range oldServices {
+		for _, destination := range service.Destinations {
+			if err := r.setDestinationWeight(ctx, service, destination, 0); err != nil {
+				r.logger.Warn("quiesce destination before reset", "service", virtualAddress(service), "backend", realAddress(destination), "error", err)
+			}
+		}
+	}
+	if err := r.applyIPVS(ctx, oldServices, nil); err != nil {
+		restoreErr := r.applyIPVS(ctx, oldServices, oldServices)
+		if restoreErr != nil { return fmt.Errorf("remove managed services: %v; restore also failed: %w", err, restoreErr) }
+		return fmt.Errorf("remove managed services: %w (previous state restored)", err)
+	}
+	r.purgeConntrack(ctx, unionServices(oldServices, desiredServices))
+	if err := r.applyIPVS(ctx, nil, desiredServices); err != nil {
+		for _, service := range desiredServices { _ = r.deleteService(ctx, service) }
+		restoreErr := r.applyIPVS(ctx, oldServices, oldServices)
+		if restoreErr != nil { return fmt.Errorf("recreate managed services: %v; restore also failed: %w", err, restoreErr) }
+		return fmt.Errorf("recreate managed services: %w (previous state restored)", err)
+	}
+	return nil
+}
+
+func (r *Reconciler) purgeConntrack(ctx context.Context, services []Service) {
+	seen := map[string]bool{}
+	for _, service := range services {
+		key := serviceKey(service)
+		if seen[key] { continue }
+		seen[key] = true
+		args := []string{"-D", "-f", "ipv4", "-p", string(service.Protocol), "-d", service.Address, "--dport", strconv.Itoa(int(service.Port))}
+		if _, err := r.runner.Run(ctx, "conntrack", args, ""); err != nil {
+			// conntrack exits non-zero when no matching entries exist. The IPVS
+			// service reset is authoritative, so an empty or unavailable table
+			// must not make the whole profile publication fail.
+			r.logger.Warn("scoped conntrack cleanup was incomplete", "service", virtualAddress(service), "protocol", service.Protocol, "error", err)
+		}
+	}
 }
 
 func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Service) error {

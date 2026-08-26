@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.6` and download the generated
-   `ezhiklb_1.0.6_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.7` and download the generated
+   `ezhiklb_1.0.7_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -141,3 +141,9 @@ Run these only on disposable test VPS nodes.
 ## 1.0.6 acceptance checks
 
 40. Open a profile with at least 4-5 routing entries. Drag one entry past several others quickly (fast mouse movement, not a slow deliberate drag) and confirm the dragged row tracks the cursor smoothly with no jump/flicker whenever another row slides past it. Repeat immediately re-grabbing a row right after dropping it (before its settle animation would have finished) and confirm the new drag starts from its actual resting position, not an offset one.
+
+## 1.0.7 acceptance checks
+
+41. Assign one profile to two agents older than `1.0.7`. Open the profile editor and confirm the reset checkbox is disabled and names the nodes that must be updated. Verify a direct API request with `reset_connections=true` is rejected as well. Update both agents to `1.0.7` and confirm the checkbox becomes available.
+42. Generate active TCP/UDP traffic through a profile with affinity, publish the next version without the reset option and verify established sessions continue. Publish another version with the option enabled and verify sessions through every assigned node are interrupted once, subsequent packets receive a fresh backend assignment, and the option is not repeated on later heartbeats or agent restarts.
+43. Before the reset, create an unrelated IPVS service and unrelated conntrack traffic on the same VPS. After publication verify both remain untouched; logs and recorded commands must contain neither `ipvsadm -C` nor `conntrack -F`.

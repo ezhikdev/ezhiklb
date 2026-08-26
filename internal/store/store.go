@@ -21,6 +21,7 @@ import (
 var ErrNotFound = errors.New("not found")
 var ErrManagedUpdateUnsupported = errors.New("the node agent must be updated manually to beta.3.3 or newer once")
 var ErrNodeNotPendingDeletion = errors.New("node is not pending deletion")
+var ErrResetUnsupported = errors.New("сначала обновите все назначенные ноды до 1.0.7, чтобы сбросить распределение клиентов")
 var profileVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$`)
 
 func resolveVersion(auto bool, requested string, number int64) (string, error) {
@@ -170,6 +171,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"update_target", `TEXT NOT NULL DEFAULT ''`},
 		{"update_state", `TEXT NOT NULL DEFAULT 'idle'`},
 		{"update_error", `TEXT NOT NULL DEFAULT ''`},
+		{"reset_revision", `INTEGER NOT NULL DEFAULT 0`},
 		{"auto_version", `INTEGER NOT NULL DEFAULT 1`},
 		{"version_label", `TEXT NOT NULL DEFAULT ''`},
 	} {
@@ -357,7 +359,7 @@ func (s *Store) CreateProfile(ctx context.Context, name, description string, con
 	return profile, revision, nil
 }
 
-func (s *Store) PublishRevision(ctx context.Context, profileID, name, description string, config domain.ProfileConfig, autoVersion bool, requestedVersion string) (domain.Profile, domain.Revision, error) {
+func (s *Store) PublishRevision(ctx context.Context, profileID, name, description string, config domain.ProfileConfig, autoVersion bool, requestedVersion string, resetConnections bool) (domain.Profile, domain.Revision, error) {
 	if err := config.Validate(); err != nil {
 		return domain.Profile{}, domain.Revision{}, err
 	}
@@ -379,6 +381,17 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 	version, err := resolveVersion(autoVersion, requestedVersion, next)
 	if err != nil { return domain.Profile{}, domain.Revision{}, err }
 	if version == currentVersion { return domain.Profile{}, domain.Revision{}, errors.New("profile version must change before publishing") }
+	if resetConnections {
+		rows, queryErr := tx.QueryContext(ctx, `SELECT agent_version FROM nodes WHERE profile_id=?`, profileID)
+		if queryErr != nil { return domain.Profile{}, domain.Revision{}, queryErr }
+		for rows.Next() {
+			var agentVersion string
+			if scanErr := rows.Scan(&agentVersion); scanErr != nil { rows.Close(); return domain.Profile{}, domain.Revision{}, scanErr }
+			if domain.CompareVersions(agentVersion, "1.0.7") < 0 { rows.Close(); return domain.Profile{}, domain.Revision{}, ErrResetUnsupported }
+		}
+		if rowsErr := rows.Err(); rowsErr != nil { rows.Close(); return domain.Profile{}, domain.Revision{}, rowsErr }
+		if rowsErr := rows.Close(); rowsErr != nil { return domain.Profile{}, domain.Revision{}, rowsErr }
+	}
 	var duplicate int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM profile_revisions WHERE profile_id=? AND version_label=?`, profileID, version).Scan(&duplicate); err != nil { return domain.Profile{}, domain.Revision{}, err }
 	if duplicate > 0 { return domain.Profile{}, domain.Revision{}, errors.New("profile version is already used") }
@@ -393,11 +406,13 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 		name, description, next, autoVersion, version, formatTime(now), profileID); err != nil {
 		return domain.Profile{}, domain.Revision{}, err
 	}
-	if _, err = tx.ExecContext(ctx,
-		`UPDATE nodes SET desired_revision=?,updated_at=? WHERE profile_id=?`, next, formatTime(now), profileID); err != nil {
+	nodesResult, err := tx.ExecContext(ctx,
+		`UPDATE nodes SET desired_revision=?,reset_revision=CASE WHEN ? THEN ? ELSE 0 END,updated_at=? WHERE profile_id=?`, next, resetConnections, next, formatTime(now), profileID)
+	if err != nil {
 		return domain.Profile{}, domain.Revision{}, err
 	}
-	if err = auditTx(ctx, tx, "profile.published", "profile", profileID, map[string]any{"name": name, "version": version}); err != nil {
+	assignedNodes, _ := nodesResult.RowsAffected()
+	if err = auditTx(ctx, tx, "profile.published", "profile", profileID, map[string]any{"name": name, "version": version, "reset_connections": resetConnections, "assigned_nodes": assignedNodes}); err != nil {
 		return domain.Profile{}, domain.Revision{}, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -433,7 +448,7 @@ func (s *Store) RollbackProfile(ctx context.Context, profileID string, number in
 	if err != nil { return domain.Profile{}, domain.Revision{}, err }
 	rollbackVersion := ""
 	if !profile.AutoVersion { rollbackVersion = fmt.Sprintf("rollback-%d", profile.CurrentRevision+1) }
-	profile, revision, err := s.PublishRevision(ctx, profileID, profile.Name, profile.Description, target.Config, profile.AutoVersion, rollbackVersion)
+	profile, revision, err := s.PublishRevision(ctx, profileID, profile.Name, profile.Description, target.Config, profile.AutoVersion, rollbackVersion, false)
 	if err == nil { _ = s.Audit(ctx, "profile.rolled_back", "profile", profileID, map[string]any{"from_revision": number, "new_revision": revision.Number}) }
 	return profile, revision, err
 }
@@ -596,7 +611,7 @@ func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) err
 		return err
 	}
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE nodes SET profile_id=?,desired_revision=?,updated_at=? WHERE id=?`, profileID, revision, formatTime(time.Now().UTC()), nodeID)
+		`UPDATE nodes SET profile_id=?,desired_revision=?,reset_revision=0,updated_at=? WHERE id=?`, profileID, revision, formatTime(time.Now().UTC()), nodeID)
 	if err != nil {
 		return err
 	}
@@ -611,12 +626,12 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 	var result domain.NodeDesiredState
 	var configJSON string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.status='deleting',n.update_target,r.config_json
+		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.reset_revision=n.desired_revision,n.status='deleting',n.update_target,r.config_json
 		FROM nodes n
 		JOIN profiles p ON p.id=n.profile_id
 		JOIN profile_revisions r ON r.profile_id=p.id AND r.number=n.desired_revision
 		LEFT JOIN node_probe_requests q ON q.node_id=n.id
-		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.Decommission, &result.UpdateVersion, &configJSON)
+		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.ResetConnections, &result.Decommission, &result.UpdateVersion, &configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrNotFound
 	}
@@ -711,6 +726,7 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	if affected == 0 {
 		return ErrNotFound
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET reset_revision=0 WHERE id=? AND reset_revision>0 AND ?>=reset_revision`, nodeID, applied); err != nil { return err }
 	if applyError != "" && applyError != previousError {
 		if err := auditTx(ctx, tx, "node.apply_failed", "node", nodeID, map[string]any{"error": applyError, "revision": applied}); err != nil { return err }
 	} else if applyError == "" && previousError != "" {
