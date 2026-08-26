@@ -14,7 +14,7 @@ const nav = [
 ] as const
 
 const emptyConfig = (): ProfileConfig => ({ schema_version: 1, health_check: { enabled: true, interval_seconds: 10, timeout_millis: 1000, failure_threshold: 3, recovery_threshold: 2 }, listeners: [] })
-const releaseVersion = "1.0.5"
+const releaseVersion = "1.0.6"
 const shellArg = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`
 const updateStageInfo: Record<string, { percent: number; label: string }> = {
   requested: { percent: 8, label: "Отправлен запрос…" },

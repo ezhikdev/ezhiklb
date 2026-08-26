@@ -136,13 +136,21 @@ function RuleList({ listeners, onToggle, onEdit, onClone, onRemove, onReorder }:
       const el = rowRefs.current.get(listener.id)
       if (!el) continue
       const previous = rectsRef.current.get(listener.id)
+      // Clear any in-flight transform *before* measuring. getBoundingClientRect()
+      // reports the current painted (transformed) position, not the row's true
+      // position in flow — the dragged row always has a transform applied, and a
+      // neighbor can still be mid-FLIP-transition from the previous reorder step.
+      // Measuring without clearing first corrupts the reference rect, which then
+      // compounds on every subsequent pointer move (the dragged row visibly
+      // "jumping" whenever another row shifts past it).
+      el.style.transition = "none"
+      el.style.transform = ""
       const next = el.getBoundingClientRect()
       rectsRef.current.set(listener.id, next)
       if (listener.id === draggingId) { applyDragTransform(listener.id); continue }
       if (!previous) continue
       const dy = previous.top - next.top
       if (Math.abs(dy) < 0.5) continue
-      el.style.transition = "none"
       el.style.transform = `translateY(${dy}px)`
       el.getBoundingClientRect()
       requestAnimationFrame(() => { el.style.transition = "transform .28s cubic-bezier(.22,.8,.32,1)"; el.style.transform = "" })
@@ -154,11 +162,16 @@ function RuleList({ listeners, onToggle, onEdit, onClone, onRemove, onReorder }:
     if (event.pointerType === "mouse" && event.button !== 0) return
     const el = rowRefs.current.get(id)
     if (!el) return
+    // Clear first in case this row is grabbed again mid-settle from a previous
+    // drop — otherwise the grab offset is computed against a still-animating
+    // (transformed) rect instead of the row's true resting position.
+    el.style.transition = "none"
+    el.style.transform = ""
     const rect = el.getBoundingClientRect()
+    rectsRef.current.set(id, rect)
     dragRef.current = { id, pointerId: event.pointerId, grabOffsetY: event.clientY - rect.top }
     lastPointerY.current = event.clientY
     setDraggingId(id)
-    el.style.transition = "none"
     el.style.zIndex = "5"
     event.currentTarget.setPointerCapture(event.pointerId)
     event.preventDefault()

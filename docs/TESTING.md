@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.5` and download the generated
-   `ezhiklb_1.0.5_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.6` and download the generated
+   `ezhiklb_1.0.6_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -137,3 +137,7 @@ Run these only on disposable test VPS nodes.
 37. Wait past the one-minute grace period and confirm the button appears; confirm the dialog and verify the row disappears, an audit event `node.force_deleted` appears in Journal, and `DELETE /api/v1/nodes/{id}/force-delete` cannot be re-run against the same (now gone) id (`404`).
 38. As a control, delete a healthy online node normally and verify the force-delete button never appears for it while its agent is actively acknowledging the decommission within the grace period.
 39. Confirm `POST /api/v1/nodes/{id}/force-delete` against a node that is *not* in `deleting` status returns `409` and leaves the node untouched.
+
+## 1.0.6 acceptance checks
+
+40. Open a profile with at least 4-5 routing entries. Drag one entry past several others quickly (fast mouse movement, not a slow deliberate drag) and confirm the dragged row tracks the cursor smoothly with no jump/flicker whenever another row slides past it. Repeat immediately re-grabbing a row right after dropping it (before its settle animation would have finished) and confirm the new drag starts from its actual resting position, not an offset one.
