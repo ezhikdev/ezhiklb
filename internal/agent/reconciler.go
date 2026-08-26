@@ -177,6 +177,18 @@ func (r *Reconciler) RestoredHealthCheck() domain.HealthCheck {
 	return state.HealthCheck
 }
 
+// SaveHealthCheck upgrades legacy state files and keeps the last confirmed
+// monitoring policy available while the panel is offline. It deliberately
+// leaves the committed data-plane revision and services untouched.
+func (r *Reconciler) SaveHealthCheck(config domain.HealthCheck) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, err := r.loadState()
+	if err != nil { return err }
+	state.HealthCheck = config
+	return r.saveState(state)
+}
+
 // Decommission removes only services and firewall rules managed by EzhikLB.
 // Unrelated IPVS services and host firewall rules remain untouched.
 func (r *Reconciler) Decommission(ctx context.Context) error {

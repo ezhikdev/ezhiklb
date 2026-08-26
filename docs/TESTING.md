@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v0.1.0-beta.3.3` and download the generated
-   `ezhiklb_0.1.0-beta.3.3_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v0.1.0-beta.3.4` and download the generated
+   `ezhiklb_0.1.0-beta.3.4_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.

@@ -30,11 +30,22 @@ func NewHealthMonitor(runner Runner, reconciler *Reconciler, logger *slog.Logger
 
 func (m *HealthMonitor) Run(ctx context.Context, config domain.HealthCheck, services func() []Service) {
 	if !config.Enabled {
+		m.logger.Info("health monitor disabled")
+		return
+	}
+	if config.IntervalSeconds < 1 || config.TimeoutMillis < 1 || config.FailureThreshold < 1 || config.RecoveryThreshold < 1 {
+		m.logger.Error("health monitor has invalid settings",
+			"interval_seconds", config.IntervalSeconds,
+			"timeout_millis", config.TimeoutMillis,
+			"failure_threshold", config.FailureThreshold,
+			"recovery_threshold", config.RecoveryThreshold)
 		return
 	}
 	interval := time.Duration(config.IntervalSeconds) * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	m.logger.Info("health monitor started", "interval_seconds", config.IntervalSeconds, "failure_threshold", config.FailureThreshold, "recovery_threshold", config.RecoveryThreshold)
+	defer m.logger.Info("health monitor stopped")
 	m.checkAll(ctx, config, services())
 	for {
 		select {
@@ -122,7 +133,10 @@ func (m *HealthMonitor) applyAddressState(ctx context.Context, services []Servic
 			if state == ReachabilityDown {
 				weight = 0
 			}
-			if err := m.reconciler.setDestinationWeight(ctx, service, destination, weight); err != nil {
+			weightCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := m.reconciler.setDestinationWeight(weightCtx, service, destination, weight)
+			cancel()
+			if err != nil {
 				m.logger.Error("update health weight", "service", serviceKey(service), "backend", destinationKey(destination), "error", err)
 			}
 		}

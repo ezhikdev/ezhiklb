@@ -577,6 +577,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-beta.3.3"
+const Version = "0.1.0-beta.3.4"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

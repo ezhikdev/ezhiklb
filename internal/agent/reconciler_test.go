@@ -80,3 +80,21 @@ func TestRestoreRebuildsSavedDataPlane(t *testing.T) {
 	}
 	if !serviceRestored || !destinationRestored { t.Fatalf("saved IPVS state was not restored: %#v", runner.calls) }
 }
+
+func TestSaveHealthCheckPreservesAppliedDataPlane(t *testing.T) {
+	r := NewReconciler(&fakeRunner{}, filepath.Join(t.TempDir(), "state.json"), nil)
+	service := Service{Protocol: domain.ProtocolUDP, Address: "198.51.100.10", Port: 8002}
+	if err := r.saveState(AppliedState{Revision: 8, Services: []Service{service}}); err != nil {
+		t.Fatal(err)
+	}
+	health := domain.DefaultHealthCheck()
+	health.IntervalSeconds = 30
+	if err := r.SaveHealthCheck(health); err != nil {
+		t.Fatal(err)
+	}
+	state, err := r.loadState()
+	if err != nil { t.Fatal(err) }
+	if state.Revision != 8 { t.Fatalf("revision = %d, want 8", state.Revision) }
+	if len(state.Services) != 1 || state.Services[0].Port != 8002 { t.Fatalf("services changed: %#v", state.Services) }
+	if state.HealthCheck.IntervalSeconds != 30 || !state.HealthCheck.Enabled { t.Fatalf("health-check was not persisted: %#v", state.HealthCheck) }
+}
