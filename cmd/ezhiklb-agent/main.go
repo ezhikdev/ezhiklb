@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-beta.3.2"
+const version = "0.1.0-beta.3.3"
 
 type client struct {
 	baseURL string
@@ -106,6 +106,11 @@ func main() {
 		restoreNeedsProfile = false
 		lastUpdateTarget = desired.UpdateVersion
 		if desired.UpdateVersion != "" && desired.UpdateVersion != version {
+			if domain.CompareVersions(desired.UpdateVersion, version) <= 0 {
+				updateState, updateError = "completed", ""
+				logger.Info("ignoring stale update target", "target", desired.UpdateVersion, "current", version)
+				return true
+			}
 			updateState, updateError = "requested", ""
 			report()
 			updateCtx, cancelUpdate := context.WithTimeout(ctx, 3*time.Minute)

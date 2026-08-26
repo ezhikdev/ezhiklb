@@ -66,14 +66,14 @@ func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	defer s.Close()
 	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default"); err != nil { t.Fatal(err) }
-	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3' WHERE id='local'`); err != nil { t.Fatal(err) }
-	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.2"); err != nil { t.Fatal(err) }
+	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3.3' WHERE id='local'`); err != nil { t.Fatal(err) }
+	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil { t.Fatal(err) }
 	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", false); err != nil { t.Fatal(err) }
 	nodes, err := s.ListNodes(ctx); if err != nil { t.Fatal(err) }
 	if nodes[0].UpdateState != "unsupported" || nodes[0].UpdateTarget != "" { t.Fatalf("legacy update was not completed as unsupported: %#v", nodes[0]) }
-	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3' WHERE id='local'`); err != nil { t.Fatal(err) }
-	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.2"); err != nil { t.Fatal(err) }
-	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil { t.Fatal(err) }
+	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3.3' WHERE id='local'`); err != nil { t.Fatal(err) }
+	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil { t.Fatal(err) }
+	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil { t.Fatal(err) }
 	nodes, err = s.ListNodes(ctx); if err != nil { t.Fatal(err) }
 	if nodes[0].UpdateState != "completed" || nodes[0].UpdateTarget != "" { t.Fatalf("completion was not recorded: %#v", nodes[0]) }
 }

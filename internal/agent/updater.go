@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var releaseVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$`)
 
 // Update stage names reported to the panel via heartbeat while an update is
 // in progress, so the UI can show real (coarse-grained) progress instead of
@@ -29,7 +32,7 @@ const (
 // onStage, if non-nil, is called as each stage starts so the caller can
 // report progress upstream before the (possibly slow) step runs.
 func InstallAgentUpdate(ctx context.Context, version string, onStage func(stage string)) error {
-	if version == "" || strings.ContainsAny(version, `/\\ \t\r\n`) { return fmt.Errorf("invalid update version") }
+	if !releaseVersionPattern.MatchString(version) { return fmt.Errorf("invalid update version %q", version) }
 	if onStage == nil { onStage = func(string) {} }
 	asset := fmt.Sprintf("ezhiklb_%s_linux_amd64.tar.gz", version)
 	base := fmt.Sprintf("https://github.com/ezhikdev/ezhiklb/releases/download/v%s/", version)

@@ -19,7 +19,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
-var ErrManagedUpdateUnsupported = errors.New("the node agent must be updated manually to beta.3 or newer once")
+var ErrManagedUpdateUnsupported = errors.New("the node agent must be updated manually to beta.3.3 or newer once")
 var profileVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$`)
 
 func resolveVersion(auto bool, requested string, number int64) (string, error) {
@@ -643,16 +643,16 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	diagnosticsJSON, _ := json.Marshal(diagnostics)
 	var updateTarget, previousUpdateState, previousUpdateError string
 	_ = tx.QueryRowContext(ctx, `SELECT update_target,update_state,update_error FROM nodes WHERE id=?`, nodeID).Scan(&updateTarget, &previousUpdateState, &previousUpdateError)
-	// Agents released before beta.3 do not send update_state. Preserve the
-	// panel-side request for capable agents. Older agents cannot execute it,
+	// Legacy agents either do not send update_state or contain the beta-version
+	// validation bug fixed in beta.3.3. Preserve requests only for capable agents;
 	// so finish the request as unsupported instead of showing endless progress.
 	if updateState == "" && updateTarget != "" && !agentSupportsManagedUpdate(version) {
-		updateState, updateError, updateTarget = "unsupported", "Первое обновление агента до beta.3 или новее выполняется вручную", ""
+		updateState, updateError, updateTarget = "unsupported", "Первое обновление агента до beta.3.3 или новее выполняется вручную", ""
 	} else if updateState == "" {
 		updateState, updateError = previousUpdateState, previousUpdateError
 		if updateState == "" { updateState = "idle" }
 	}
-	if updateTarget != "" && version == updateTarget { updateState = "completed"; updateError = ""; updateTarget = "" }
+	if updateTarget != "" && domain.CompareVersions(version, updateTarget) >= 0 { updateState = "completed"; updateError = ""; updateTarget = "" }
 	// Keep completion visible until another update is requested. Otherwise a
 	// regular heartbeat can erase it before the UI observes the result.
 	if updateTarget == "" && previousUpdateState == "completed" && updateState == "idle" { updateState = "completed" }
@@ -706,9 +706,12 @@ func agentSupportsManagedUpdate(version string) bool {
 	if minor != 1 { return minor > 1 }
 	if patch != 0 { return patch > 0 }
 	if len(parts) == 1 { return true }
-	var beta int
-	_, err := fmt.Sscanf(parts[1], "beta.%d", &beta)
-	return err == nil && beta >= 3
+	segments := strings.Split(parts[1], ".")
+	if len(segments) < 2 || segments[0] != "beta" { return false }
+	var betaMajor, betaPatch int
+	if _, err := fmt.Sscan(segments[1], &betaMajor); err != nil { return false }
+	if len(segments) > 2 { if _, err := fmt.Sscan(segments[2], &betaPatch); err != nil { return false } }
+	return betaMajor > 3 || (betaMajor == 3 && betaPatch >= 3)
 }
 
 func (s *Store) ListHealth(ctx context.Context) ([]domain.BackendHealth, error) {

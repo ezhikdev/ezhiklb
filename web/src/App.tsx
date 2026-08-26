@@ -13,7 +13,7 @@ const nav = [
 ] as const
 
 const emptyConfig = (): ProfileConfig => ({ schema_version: 1, health_check: { enabled: true, interval_seconds: 10, timeout_millis: 1000, failure_threshold: 3, recovery_threshold: 2 }, listeners: [] })
-const releaseVersion = "0.1.0-beta.3.2"
+const releaseVersion = "0.1.0-beta.3.3"
 const shellArg = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`
 const updateStageInfo: Record<string, { percent: number; label: string }> = {
   requested: { percent: 8, label: "Отправлен запрос…" },
@@ -198,13 +198,13 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
     <Card className="table-card"><div className="node-table">{nodes.map((node) => {
       const locked = node.status === "deleting"
       const assignedProfile = profiles.find((profile) => profile.id === node.profile_id)
-      const supportsOneClickUpdate = !isOlderVersion(node.agent_version, "0.1.0-beta.3")
+      const supportsOneClickUpdate = !isOlderVersion(node.agent_version, "0.1.0-beta.3.3")
       const updateStage = supportsOneClickUpdate && node.update_state ? updateStageInfo[node.update_state] : undefined
       const updating = Boolean(updateStage)
       return <div className={`node-table__row ${node.status === "disabled" ? "node-table__row--disabled" : ""} ${locked ? "node-table__row--deleting" : ""}`} key={node.id}>
         <button type="button" className="node-name node-name--button" onClick={() => setSelectedNode(node)}><div className={`node-avatar node-avatar--${nodeVisualState(node)}`}><Server /></div><div><strong>{node.name}</strong><span className="mono">{node.observed_address || node.ingress_address || "IP определится при подключении"} · {node.agent_version || "ожидает агента"}</span><small>{node.status === "online" && node.online_since ? `В сети ${formatDuration(Date.now() - new Date(node.online_since).getTime())}` : node.status === "deleting" ? "Ожидаем очистку конфигурации на VPS" : node.last_seen_at ? `Последний ответ ${formatRelative(node.last_seen_at)}` : "Heartbeat ещё не получен"}</small><NodeMetricsStrip node={node} /></div></button>
         <div className="compact-select"><span>Профиль</span>{locked ? <strong className="node-locked">Удаление…</strong> : <SelectMenu compact label={`Профиль ноды ${node.name}`} value={node.profile_id} onChange={async (value) => { await api.assignProfile(node.id, value); await onChanged() }} options={profiles.map((profile) => ({ value: profile.id, label: profile.name, description: profile.version }))} />}</div>
-        <div className="node-actions"><div className="revision-state"><span>{applyStateLabel(node)}</span><span>{assignedProfile?.version || "версия неизвестна"}</span>{node.update_state === "error" && <span className="revision-error" title={node.update_error}>{node.update_error}</span>}{!updating && isOlderVersion(node.agent_version, releaseVersion) && node.status === "online" && (supportsOneClickUpdate ? <Button variant="secondary" className="node-update-button" onClick={() => setConfirmNode({ node, action: "update" })}><RefreshCw />Обновить до {releaseVersion}</Button> : <span className="node-update-legacy" title="Агенты до beta.3 не умеют получать команду обновления из панели">Первое обновление — вручную</span>)}{node.last_error && <span className="revision-error" title={node.last_error}>{node.last_error}</span>}</div>{!locked && <div className={`node-action-buttons ${node.id === "local" ? "node-action-buttons--local" : ""}`}><Button variant="ghost" className="icon-button" title="Изменить" aria-label={`Изменить ${node.name}`} onClick={() => { setEditingNode(node); setEditName(node.name) }}><Pencil /></Button><Button variant="ghost" className="icon-button" title={node.status === "disabled" ? "Включить" : "Выключить"} aria-label={`${node.status === "disabled" ? "Включить" : "Выключить"} ${node.name}`} onClick={() => { void changeEnabled(node) }}><Power /></Button>{node.id !== "local" && <Button variant="ghost" className="icon-button danger-hover" title="Удалить" aria-label={`Удалить ${node.name}`} onClick={() => setConfirmNode({ node, action: "delete" })}><Trash2 /></Button>}</div>}</div>
+        <div className="node-actions"><div className="revision-state"><span>{applyStateLabel(node)}</span><span>{assignedProfile?.version || "версия неизвестна"}</span>{node.update_state === "error" && <span className="revision-error" title={node.update_error}>{node.update_error}</span>}{!updating && isOlderVersion(node.agent_version, releaseVersion) && node.status === "online" && (supportsOneClickUpdate ? <Button variant="secondary" className="node-update-button" onClick={() => setConfirmNode({ node, action: "update" })}><RefreshCw />Обновить до {releaseVersion}</Button> : <span className="node-update-legacy" title="В версиях до beta.3.3 валидатор ошибочно отклоняет имя beta-релиза">Первое обновление — вручную</span>)}{node.last_error && <span className="revision-error" title={node.last_error}>{node.last_error}</span>}</div>{!locked && <div className={`node-action-buttons ${node.id === "local" ? "node-action-buttons--local" : ""}`}><Button variant="ghost" className="icon-button" title="Изменить" aria-label={`Изменить ${node.name}`} onClick={() => { setEditingNode(node); setEditName(node.name) }}><Pencil /></Button><Button variant="ghost" className="icon-button" title={node.status === "disabled" ? "Включить" : "Выключить"} aria-label={`${node.status === "disabled" ? "Включить" : "Выключить"} ${node.name}`} onClick={() => { void changeEnabled(node) }}><Power /></Button>{node.id !== "local" && <Button variant="ghost" className="icon-button danger-hover" title="Удалить" aria-label={`Удалить ${node.name}`} onClick={() => setConfirmNode({ node, action: "delete" })}><Trash2 /></Button>}</div>}</div>
         {updateStage && <div className="update-progress" role="progressbar" aria-valuenow={updateStage.percent} aria-valuemin={0} aria-valuemax={100} aria-label={`Обновление ${node.name}: ${updateStage.label}`}><RefreshCw className="spin" /><div className="update-progress__track"><div className="update-progress__fill" style={{ width: `${updateStage.percent}%` }} /></div><span className="update-progress__label">{updateStage.label}</span></div>}
       </div>
     })}</div></Card>
@@ -368,11 +368,16 @@ function MetricChart({ title, icon, points, series, format }: { title: string; i
   }
   const tooltipPercent = index == null ? 0 : (xAt(index) / width) * 100
   const tooltipSide = index == null ? "middle" : index / Math.max(1, points.length - 1) < .24 ? "start" : index / Math.max(1, points.length - 1) > .76 ? "end" : "middle"
+  const hoveredYs = index == null ? [] : series.map((item) => yAt(item.key, index))
+  const topPoint = hoveredYs.length ? Math.min(...hoveredYs) : paddingTop
+  const bottomPoint = hoveredYs.length ? Math.max(...hoveredYs) : plotBottom
+  const tooltipVertical = plotBottom - bottomPoint >= topPoint - paddingTop ? "below" : "above"
+  const tooltipTop = tooltipVertical === "below" ? bottomPoint : topPoint
   return <Card className="metric-chart"><div className="metric-chart__header"><div>{icon}<div><span>{title}</span><strong>{headline ? series.map((item) => `${item.label}: ${format(Number(headline[item.key]))}`).join(" · ") : "Нет данных"}</strong></div></div><div className="metric-chart__legend">{series.map((item) => <span key={item.key}><i className={`chart-color--${item.color}`} />{item.label}</span>)}</div></div><div className="metric-chart__canvas">{points.length < 2 ? <span>График появится после двух минут сбора данных</span> : <>
     <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title} за последние 24 часа`} preserveAspectRatio="none" onPointerMove={trackPointer} onPointerDown={trackPointer} onPointerLeave={() => setHoverIndex(null)} onPointerUp={() => setHoverIndex(null)} onPointerCancel={() => setHoverIndex(null)}>
       <path className="chart-grid-line" d={`M${paddingX},${(paddingTop + plotBottom) / 2} H${width - paddingX}`} />
       {series.map((item) => <path key={`area-${item.key}`} className={`chart-area chart-area--${item.color}`} d={areaFor(item.key)} />)}
-      {series.map((item) => <path key={`${item.key}-${points.length}`} pathLength={1} className={`chart-line chart-line--${item.color}`} d={pathFor(item.key)} />)}
+      {series.map((item) => <path key={`${item.key}-${points.length}`} className={`chart-line chart-line--${item.color}`} d={pathFor(item.key)} />)}
       {series.map((item) => <circle key={`live-${item.key}`} className={`chart-live-dot chart-live-dot--${item.color}`} cx={xAt(points.length - 1)} cy={yAt(item.key, points.length - 1)} r={2.8} />)}
       {index != null && <g aria-hidden="true">
         <line className="chart-hover-line" x1={xAt(index)} x2={xAt(index)} y1={paddingTop} y2={plotBottom} />
@@ -380,7 +385,7 @@ function MetricChart({ title, icon, points, series, format }: { title: string; i
       </g>}
     </svg>
     <div className="chart-time-axis" aria-hidden="true"><span>{new Date(points[0].collected_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</span><span>сейчас</span></div>
-    {hovered && <div className={`chart-tooltip chart-tooltip--${tooltipSide}`} style={{ left: `${tooltipPercent}%` }} aria-hidden="true">
+    {hovered && <div className={`chart-tooltip chart-tooltip--${tooltipSide} chart-tooltip--${tooltipVertical}`} style={{ left: `${tooltipPercent}%`, top: `${tooltipTop / height * 100}%` }} aria-hidden="true">
       <time>{new Date(hovered.collected_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</time>
       {series.map((item) => <div key={item.key}><i className={`chart-color--${item.color}`} /><span>{item.label}</span><strong>{format(Number(hovered[item.key]))}</strong></div>)}
     </div>}
