@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-beta.3.5
+
+- Исправлены права systemd для self-update агента: при `ProtectSystem=strict`
+  каталог `/opt/ezhiklb/bin` теперь явно доступен на запись только сервису ноды.
+- Атомарная замена проверенного бинарника больше не завершается ошибкой
+  `open /opt/ezhiklb/bin/.ezhiklb-agent-update-*: read-only file system`.
+
 ## 0.1.0-beta.3.4
 
 - Исправлено восстановление ICMP health-check после self-update: устаревший

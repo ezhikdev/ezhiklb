@@ -125,3 +125,8 @@ Self-update is inherently bootstrap-limited: a node can only react to a panel-is
 request if its *currently running* agent binary already contains this polling/reporting logic.
 A node still on a pre-`beta.3` agent must be upgraded once through the ordinary install command
 before the one-click button has any effect on it.
+
+The agent service keeps `ProtectSystem=strict`; its `ReadWritePaths` allow only the agent state
+directory and `/opt/ezhiklb/bin`. The latter is required for the verified temporary binary and
+atomic rename used by self-update, while the remainder of the system image stays read-only in
+the service mount namespace.

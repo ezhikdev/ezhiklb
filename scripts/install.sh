@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-beta.3.4"
+EZHIKLB_VERSION="0.1.0-beta.3.5"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -292,7 +292,7 @@ RestartSec=3s
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=${AGENT_DATA_DIR}
+ReadWritePaths=${AGENT_DATA_DIR} ${PREFIX}/bin
 
 [Install]
 WantedBy=multi-user.target
