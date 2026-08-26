@@ -1,5 +1,5 @@
-import { ArrowRight, Copy, Pencil, Plus, Server, Trash2 } from "lucide-react"
-import { useMemo, useState } from "react"
+import { ArrowRight, Copy, GripVertical, Pencil, Plus, Server, Trash2 } from "lucide-react"
+import { useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { Backend, BackendHealth, Listener, ProfileConfig, Protocol } from "../types"
 import { Badge, Button, Card, ConfirmDialog, Dialog, Field, Input, SelectMenu, Switch } from "./ui"
 
@@ -99,20 +99,129 @@ export function ProfileEditor({ initial, health, nodeAddresses, onChange }: { in
 
     {config.listeners.length === 0
       ? <div className="inline-empty"><Server /><div><strong>Записей пока нет</strong><span>Добавьте входной порт и хотя бы один backend.</span></div></div>
-      : <div className="rule-list">{config.listeners.map((listener, index) => <RuleRow key={listener.id} listener={listener}
-          onToggle={(enabled) => update({ ...config, listeners: config.listeners.map((item, itemIndex) => itemIndex === index ? { ...item, enabled } : item) })}
-          onEdit={() => setEditing({ listener: structuredClone(listener), index })}
-          onClone={() => cloneListener(listener)} onRemove={() => setRemoving(index)} />)}</div>}
+      : <RuleList listeners={config.listeners}
+          onToggle={(index, enabled) => update({ ...config, listeners: config.listeners.map((item, itemIndex) => itemIndex === index ? { ...item, enabled } : item) })}
+          onEdit={(index) => setEditing({ listener: structuredClone(config.listeners[index]), index })}
+          onClone={(index) => cloneListener(config.listeners[index])}
+          onRemove={(index) => setRemoving(index)}
+          onReorder={(next) => update({ ...config, listeners: next })} />}
 
     {editing && <ListenerDialog initial={editing.listener} others={config.listeners.filter((_, index) => index !== editing.index)} health={health ?? []} nodeAddresses={nodeAddresses ?? []} onSave={saveListener} onClose={() => setEditing(null)} />}
     {removing != null && <ConfirmDialog title="Удалить запись?" description={`Запись «${config.listeners[removing].name}» будет удалена из профиля.`} confirmLabel="Удалить запись" danger onCancel={() => setRemoving(null)} onConfirm={() => removeListener(removing)} />}
   </div>
 }
 
-function RuleRow({ listener, onToggle, onEdit, onClone, onRemove }: { listener: Listener; onToggle: (enabled: boolean) => void; onEdit: () => void; onClone: () => void; onRemove: () => void }) {
+// Custom drag reordering (no library): each row's DOM node is tracked by id so a
+// pointer-driven drag can move it with a direct 1:1 transform while the other rows
+// FLIP-animate into their new slots. Reordering only changes array order — it never
+// touches listener data, so it is purely a display/organization affordance.
+function RuleList({ listeners, onToggle, onEdit, onClone, onRemove, onReorder }: { listeners: Listener[]; onToggle: (index: number, enabled: boolean) => void; onEdit: (index: number) => void; onClone: (index: number) => void; onRemove: (index: number) => void; onReorder: (next: Listener[]) => void }) {
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const rectsRef = useRef(new Map<string, DOMRect>())
+  const dragRef = useRef<{ id: string; pointerId: number; grabOffsetY: number } | null>(null)
+  const lastPointerY = useRef(0)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+
+  const applyDragTransform = (id: string) => {
+    const el = rowRefs.current.get(id)
+    const rect = rectsRef.current.get(id)
+    if (!el || !rect) return
+    const info = dragRef.current
+    const desiredTop = lastPointerY.current - (info?.grabOffsetY ?? 0)
+    el.style.transform = `translateY(${(desiredTop - rect.top).toFixed(1)}px) scale(1.015)`
+  }
+
+  useLayoutEffect(() => {
+    for (const listener of listeners) {
+      const el = rowRefs.current.get(listener.id)
+      if (!el) continue
+      const previous = rectsRef.current.get(listener.id)
+      const next = el.getBoundingClientRect()
+      rectsRef.current.set(listener.id, next)
+      if (listener.id === draggingId) { applyDragTransform(listener.id); continue }
+      if (!previous) continue
+      const dy = previous.top - next.top
+      if (Math.abs(dy) < 0.5) continue
+      el.style.transition = "none"
+      el.style.transform = `translateY(${dy}px)`
+      el.getBoundingClientRect()
+      requestAnimationFrame(() => { el.style.transition = "transform .28s cubic-bezier(.22,.8,.32,1)"; el.style.transform = "" })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listeners, draggingId])
+
+  const startDrag = (event: React.PointerEvent<HTMLButtonElement>, id: string) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return
+    const el = rowRefs.current.get(id)
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    dragRef.current = { id, pointerId: event.pointerId, grabOffsetY: event.clientY - rect.top }
+    lastPointerY.current = event.clientY
+    setDraggingId(id)
+    el.style.transition = "none"
+    el.style.zIndex = "5"
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+
+  const onHandleMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const info = dragRef.current
+    if (!info || info.pointerId !== event.pointerId) return
+    lastPointerY.current = event.clientY
+    applyDragTransform(info.id)
+    const rect = rectsRef.current.get(info.id)
+    if (!rect) return
+    const draggedCenter = lastPointerY.current - info.grabOffsetY + rect.height / 2
+    let targetIndex = 0
+    for (const listener of listeners) {
+      if (listener.id === info.id) continue
+      const other = rectsRef.current.get(listener.id)
+      if (other && draggedCenter > other.top + other.height / 2) targetIndex++
+    }
+    const fromIndex = listeners.findIndex((item) => item.id === info.id)
+    if (targetIndex !== fromIndex && fromIndex !== -1) {
+      const next = [...listeners]
+      const [moved] = next.splice(fromIndex, 1)
+      next.splice(targetIndex, 0, moved)
+      onReorder(next)
+    }
+  }
+
+  const endDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const info = dragRef.current
+    if (!info || info.pointerId !== event.pointerId) return
+    const el = rowRefs.current.get(info.id)
+    if (el) {
+      el.style.transition = "transform .22s cubic-bezier(.22,.8,.32,1)"
+      el.style.transform = ""
+      el.style.zIndex = ""
+    }
+    dragRef.current = null
+    setDraggingId(null)
+  }
+
+  return <div className="rule-list">{listeners.map((listener, index) => (
+    <div key={listener.id} data-row-id={listener.id}
+      ref={(el) => { if (el) rowRefs.current.set(listener.id, el); else rowRefs.current.delete(listener.id) }}
+      className={`rule-row-wrap ${draggingId === listener.id ? "rule-row-wrap--dragging" : ""}`}>
+      <RuleRow listener={listener}
+        onToggle={(enabled) => onToggle(index, enabled)}
+        onEdit={() => onEdit(index)}
+        onClone={() => onClone(index)}
+        onRemove={() => onRemove(index)}
+        onGrabStart={(event) => startDrag(event, listener.id)}
+        onGrabMove={onHandleMove}
+        onGrabEnd={endDrag} />
+    </div>
+  ))}</div>
+}
+
+function RuleRow({ listener, onToggle, onEdit, onClone, onRemove, onGrabStart, onGrabMove, onGrabEnd }: { listener: Listener; onToggle: (enabled: boolean) => void; onEdit: () => void; onClone: () => void; onRemove: () => void; onGrabStart: (event: React.PointerEvent<HTMLButtonElement>) => void; onGrabMove: (event: React.PointerEvent<HTMLButtonElement>) => void; onGrabEnd: (event: React.PointerEvent<HTMLButtonElement>) => void }) {
   const enabledBackends = listener.backends.filter((backend) => backend.enabled)
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
   return <Card className={`rule-row ${listener.enabled ? "" : "rule-row--disabled"}`}>
+    <button type="button" className="rule-row__handle" aria-label={`Изменить порядок: ${listener.name}`} title="Перетащите, чтобы изменить порядок в списке"
+      onPointerDown={onGrabStart} onPointerMove={onGrabMove} onPointerUp={onGrabEnd} onPointerCancel={onGrabEnd}><GripVertical /></button>
     <div className="rule-row__toggle"><Switch label={`${listener.enabled ? "Выключить" : "Включить"} ${listener.name}`} checked={listener.enabled} onChange={onToggle} /></div>
     <button type="button" className="rule-row__main" onClick={onEdit}>
       <div className="rule-row__name"><strong>{listener.name}</strong><span>{listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}</span></div>

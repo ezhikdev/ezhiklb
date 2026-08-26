@@ -48,6 +48,7 @@ export const api = {
   createNode: (name: string, ingressAddress: string, profileID: string) => request<{ node: NodeInfo; agent_token: string }>("/api/v1/nodes", { method: "POST", body: JSON.stringify({ name, ingress_address: ingressAddress, profile_id: profileID }) }),
   updateNode: (id: string, name: string, ingressAddress: string) => request<void>(`/api/v1/nodes/${id}`, { method: "PUT", body: JSON.stringify({ name, ingress_address: ingressAddress }) }),
   deleteNode: (id: string) => request<void>(`/api/v1/nodes/${id}`, { method: "DELETE" }),
+  forceDeleteNode: (id: string) => request<void>(`/api/v1/nodes/${id}/force-delete`, { method: "POST" }),
   setNodeEnabled: (id: string, enabled: boolean) => request<void>(`/api/v1/nodes/${id}/enabled`, { method: "PUT", body: JSON.stringify({ enabled }) }),
   requestHealthProbe: (id: string) => request<{ health_probe: number }>(`/api/v1/nodes/${id}/health-probe`, { method: "POST" }),
   requestNodeUpdate: (id: string) => request<{ version: string }>(`/api/v1/nodes/${id}/update`, { method: "POST" }),

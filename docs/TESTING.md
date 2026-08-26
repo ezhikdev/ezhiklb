@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.3` and download the generated
-   `ezhiklb_1.0.3_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.5` and download the generated
+   `ezhiklb_1.0.5_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -123,3 +123,17 @@ Run these only on disposable test VPS nodes.
 
 30. Fresh-install the `Panel` role only (no local node, no remote nodes enrolled yet), open the panel in a browser and confirm it loads and stays rendered — no blank/white screen after the first `load()` poll. Check `curl -s http://127.0.0.1:8080/api/v1/nodes` (through the SSH tunnel or locally) returns `[]`, never `null`, and likewise for `/api/v1/profiles` if every profile were ever deleted.
 31. With devtools open, watch the Network tab during that same fresh `Panel`-only load and confirm no uncaught exception appears in the Console when the empty-nodes response arrives.
+
+## 1.0.4 acceptance checks
+
+32. Open a profile with at least 3 routing entries. Grab the handle on the left of a row and drag it up/down with the mouse; verify the other rows slide smoothly out of the way as you cross their midpoint, the dragged row visibly lifts (shadow/scale), and it settles into place on release without a jump.
+33. Repeat the same drag on a touchscreen/touch emulation (single-finger drag on the handle) and verify it reorders the same way without also scrolling the page.
+34. Reorder entries, then publish the profile; reopen it and confirm the new order was actually saved (not just visual). Verify reordering does not change any listener's config (address/port/backends/weights) and does not by itself affect live IPVS distribution — order is display-only.
+35. With OS-level "reduce motion" enabled, repeat the drag and confirm the reorder still works but without the sliding/lift animation.
+
+## 1.0.5 acceptance checks
+
+36. Reproduce a stuck decommission: enroll a node, let its agent fail to apply (e.g. occupy its ports first so the strict first-revision check in `install.sh` stops `ezhiklb-agent.service`), then delete it from the panel. Confirm the row stays in "deleting" and the "Удалить принудительно" button does *not* appear immediately.
+37. Wait past the one-minute grace period and confirm the button appears; confirm the dialog and verify the row disappears, an audit event `node.force_deleted` appears in Journal, and `DELETE /api/v1/nodes/{id}/force-delete` cannot be re-run against the same (now gone) id (`404`).
+38. As a control, delete a healthy online node normally and verify the force-delete button never appears for it while its agent is actively acknowledging the decommission within the grace period.
+39. Confirm `POST /api/v1/nodes/{id}/force-delete` against a node that is *not* in `deleting` status returns `409` and leaves the node untouched.

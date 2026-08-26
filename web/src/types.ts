@@ -82,6 +82,7 @@ export interface NodeInfo {
   update_target?: string
   update_state?: "idle" | "requested" | "downloading" | "verifying" | "installing" | "restarting" | "completed" | "unsupported" | "error"
   update_error?: string
+  updated_at: string
 }
 
 export interface NodeDiagnostics {

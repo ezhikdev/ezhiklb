@@ -72,6 +72,7 @@ func (s *Server) PanelHandler() http.Handler {
 	mux.Handle("POST /api/v1/nodes", s.admin(http.HandlerFunc(s.createNode)))
 	mux.Handle("PUT /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.updateNode)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.deleteNode)))
+	mux.Handle("POST /api/v1/nodes/{id}/force-delete", s.admin(http.HandlerFunc(s.forceDeleteNode)))
 	mux.Handle("PUT /api/v1/nodes/{id}/enabled", s.admin(http.HandlerFunc(s.setNodeEnabled)))
 	mux.Handle("POST /api/v1/nodes/{id}/rotate-token", s.admin(http.HandlerFunc(s.rotateNodeToken)))
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", s.admin(http.HandlerFunc(s.revokeNode)))
@@ -311,6 +312,19 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
 	if err != nil { writeError(w, http.StatusConflict, "cannot_delete", err.Error()); return }
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) forceDeleteNode(w http.ResponseWriter, r *http.Request) {
+	err := s.store.ForceDeleteNode(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+	} else if errors.Is(err, store.ErrNodeNotPendingDeletion) {
+		writeError(w, http.StatusConflict, "not_pending_deletion", "Node is not pending deletion")
+	} else if err != nil {
+		writeError(w, http.StatusConflict, "cannot_delete", err.Error())
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func (s *Server) setNodeEnabled(w http.ResponseWriter, r *http.Request) {
@@ -577,6 +591,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "1.0.3"
+const Version = "1.0.5"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

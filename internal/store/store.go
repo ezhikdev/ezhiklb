@@ -20,6 +20,7 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrManagedUpdateUnsupported = errors.New("the node agent must be updated manually to beta.3.3 or newer once")
+var ErrNodeNotPendingDeletion = errors.New("node is not pending deletion")
 var profileVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$`)
 
 func resolveVersion(auto bool, requested string, number int64) (string, error) {
@@ -561,6 +562,30 @@ func (s *Store) DeleteNode(ctx context.Context, nodeID string) error {
 	affected, _ := result.RowsAffected()
 	if affected == 0 { return ErrNotFound }
 	return s.Audit(ctx, "node.decommission_requested", "node", nodeID, map[string]any{})
+}
+
+// ForceDeleteNode removes a node that acknowledged decommission was requested
+// (status='deleting') but never confirmed cleanup — e.g. its agent was
+// replaced by a fresh enrollment or its VPS is gone. It relies on operator
+// judgement: the panel has no way to verify the remote IPVS/firewall state
+// was actually cleaned up, so it only unblocks nodes already mid-decommission,
+// never a node that hasn't been asked to decommission at all.
+func (s *Store) ForceDeleteNode(ctx context.Context, nodeID string) error {
+	if nodeID == "local" { return errors.New("local node cannot be deleted") }
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil { return err }
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=? AND status='deleting'`, nodeID)
+	if err != nil { return err }
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		var exists int
+		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, nodeID).Scan(&exists)
+		if exists == 0 { return ErrNotFound }
+		return ErrNodeNotPendingDeletion
+	}
+	if err := auditTx(ctx, tx, "node.force_deleted", "node", nodeID, map[string]any{}); err != nil { return err }
+	return tx.Commit()
 }
 
 func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) error {
