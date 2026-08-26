@@ -47,6 +47,23 @@ agent sets every matching IPVS destination weight to zero. After
 The agent also configures `expire_nodest_conn` and
 `expire_quiescent_template`, allowing new traffic to leave a quiescent backend.
 
+## UDP idle timeouts
+
+IPVS's own UDP connection timeout and the kernel's `nf_conntrack_udp_timeout*`
+sysctls default to values (300s and ~120-180s respectively) shorter than a
+realistic client idle period — a phone locked for a few minutes, for example.
+Because Affinity (IPVS persistence, `-p <seconds>`) is advertised up to 24h,
+the agent explicitly extends both to `udpIdleTimeoutSeconds` (86400s — the
+longest Affinity preset a listener can choose) in `Reconciler.configureKernel`
+(`internal/agent/reconciler.go`) via `ipvsadm --set` and the matching
+sysctls, so a resumed flow's conntrack NAT mapping and IPVS connection entry
+survive together instead of one expiring before the other and forcing a full
+re-handshake. This is a single global kernel setting (`ipvsadm --set` has no
+per-listener granularity) rather than one derived from any specific
+listener's own Affinity value; Affinity itself still governs which backend a
+client is routed back to. This addresses the "Confirmed alpha.5 findings" UDP
+idle-resume report in `docs/ROADMAP.md`.
+
 ## Security boundary
 
 The panel runs unprivileged. Only the agent runs as root. The panel never sends

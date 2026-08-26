@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.7` and download the generated
-   `ezhiklb_1.0.7_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.8` and download the generated
+   `ezhiklb_1.0.8_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -147,3 +147,9 @@ Run these only on disposable test VPS nodes.
 41. Assign one profile to two agents older than `1.0.7`. Open the profile editor and confirm the reset checkbox is disabled and names the nodes that must be updated. Verify a direct API request with `reset_connections=true` is rejected as well. Update both agents to `1.0.7` and confirm the checkbox becomes available.
 42. Generate active TCP/UDP traffic through a profile with affinity, publish the next version without the reset option and verify established sessions continue. Publish another version with the option enabled and verify sessions through every assigned node are interrupted once, subsequent packets receive a fresh backend assignment, and the option is not repeated on later heartbeats or agent restarts.
 43. Before the reset, create an unrelated IPVS service and unrelated conntrack traffic on the same VPS. After publication verify both remain untouched; logs and recorded commands must contain neither `ipvsadm -C` nor `conntrack -F`.
+
+## 1.0.8 acceptance checks — UDP idle-resume (closes the alpha.5 finding)
+
+44. After applying `1.0.8` to a node, verify the new timeouts actually landed: `sudo sysctl net.netfilter.nf_conntrack_udp_timeout net.netfilter.nf_conntrack_udp_timeout_stream` should read `60` and `86400`; `sudo ipvsadm -L --timeout` (or `cat /proc/net/ip_vs_conn` behavior) should reflect an 86400s UDP timeout instead of the kernel default 300s. This is a single global setting for the whole node — it does not vary per listener even though listeners can each pick a different Affinity value.
+45. Follow the existing "First-packet reproduction" procedure above with a *real* client (not just idle traffic): connect, then background/lock the client for 5, 10, and 20 minutes before resuming, capturing `ipvsadm -Lnc` and `conntrack -L -p udp -o extended` immediately before and after each resume. Confirm the flow's IPVS and conntrack entries are still present (or freshly re-created against the *same* backend via the persistence template) and traffic resumes without the client showing a reconnect/handshake state.
+46. Confirm this doesn't regress the existing "First-packet reproduction" 10-minute idle scenario documented above, and that `Restore()` on agent/VPS reboot still applies these sysctls (`configureKernel` runs in both `Reconcile()` and `Restore()`).

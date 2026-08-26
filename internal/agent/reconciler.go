@@ -433,13 +433,31 @@ func (r *Reconciler) setDestinationWeight(ctx context.Context, service Service, 
 	return err
 }
 
+// udpIdleTimeoutSeconds bounds how long a UDP flow's IPVS connection entry and
+// conntrack NAT mapping survive without traffic. Both the Linux kernel's IPVS
+// UDP timeout (300s) and nf_conntrack's UDP stream timeout (commonly 120-180s)
+// default to values shorter than a realistic "phone locked in a pocket"
+// interval. This is a single global kernel setting (ipvsadm --set has no
+// per-listener granularity), so it is set to 24h — the longest Affinity
+// preset a listener can choose in the panel — rather than tied to any one
+// listener's own Affinity value. Affinity/persistence keeps routing a client
+// to the same backend for as long as the operator configured regardless of
+// this timeout; what this constant prevents is the underlying connection
+// *state* expiring first and forcing a full re-handshake ("Соединение...")
+// even though persistence would have sent the resumed flow to the right
+// place anyway. See docs/ROADMAP.md's "Confirmed alpha.5 findings" for the
+// original report.
+const udpIdleTimeoutSeconds = 86400
+
 func (r *Reconciler) configureKernel(ctx context.Context) error {
 	values := map[string]string{
-		"net.ipv4.ip_forward":                     "1",
-		"net.ipv4.vs.conntrack":                   "1",
-		"net.ipv4.vs.snat_reroute":                "1",
-		"net.ipv4.vs.expire_nodest_conn":          "1",
-		"net.ipv4.vs.expire_quiescent_template":   "1",
+		"net.ipv4.ip_forward":                           "1",
+		"net.ipv4.vs.conntrack":                         "1",
+		"net.ipv4.vs.snat_reroute":                       "1",
+		"net.ipv4.vs.expire_nodest_conn":                 "1",
+		"net.ipv4.vs.expire_quiescent_template":          "1",
+		"net.netfilter.nf_conntrack_udp_timeout":         "60",
+		"net.netfilter.nf_conntrack_udp_timeout_stream":  strconv.Itoa(udpIdleTimeoutSeconds),
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -450,6 +468,12 @@ func (r *Reconciler) configureKernel(ctx context.Context) error {
 		if _, err := r.runner.Run(ctx, "sysctl", []string{"-w", key + "=" + values[key]}, ""); err != nil {
 			return err
 		}
+	}
+	// IPVS keeps its own UDP connection timeout independent of conntrack;
+	// extend it to match so neither table drops a live flow's state before
+	// the other. Global default is 900/120/300 (tcp/tcpfin/udp) seconds.
+	if _, err := r.runner.Run(ctx, "ipvsadm", []string{"--set", "900", "120", strconv.Itoa(udpIdleTimeoutSeconds)}, ""); err != nil {
+		return fmt.Errorf("set IPVS UDP connection timeout: %w", err)
 	}
 	return nil
 }
