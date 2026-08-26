@@ -1,5 +1,12 @@
 # EzhikLB roadmap
 
+## 1.0.0 — первый стабильный релиз
+
+Основной L4-контур завершён: TCP/UDP-профили, несколько нод, восстановление
+data plane без панели, ICMP health-check, телеметрия, диагностика и проверяемое
+self-update протестированы на реальных VPS. Следующий цикл развития начинается
+после стабилизации `1.0.x` и обратной связи от первой production-установки.
+
 ## Confirmed alpha.5 findings
 
 - UDP idle-resume failure is confirmed on the test VPS: after locking the phone for roughly 3–6 minutes, the existing VPN session stops passing traffic until repeated requests trigger recovery or the VPN is reconnected.

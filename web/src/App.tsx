@@ -1,5 +1,6 @@
-import { Activity, ArrowDown, ArrowUp, Boxes, CheckCircle2, ChevronDown, ChevronRight, CircleGauge, Clock3, Copy, Cpu, Github, HeartPulse, Hexagon, History, LoaderCircle, LogOut, MemoryStick, Network, Pencil, Plus, Power, RefreshCw, Save, ScrollText, Server, Settings, ShieldCheck, Trash2, Users } from "lucide-react"
+import { Activity, ArrowDown, ArrowUp, Boxes, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleGauge, Clock3, Copy, Cpu, Github, HeartPulse, Hexagon, History, LoaderCircle, LogOut, MemoryStick, Network, Pencil, Plus, Power, RefreshCw, Save, ScrollText, Server, Settings, ShieldCheck, Trash2, Users, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { ApiError, api } from "./lib/api"
 import type { AuditEvent, BackendHealth, NodeInfo, NodeMetricPoint, Profile, ProfileConfig, Revision, ServiceStat, Status, SystemSettings } from "./types"
 import { ProfileEditor } from "./components/ProfileEditor"
@@ -13,7 +14,7 @@ const nav = [
 ] as const
 
 const emptyConfig = (): ProfileConfig => ({ schema_version: 1, health_check: { enabled: true, interval_seconds: 10, timeout_millis: 1000, failure_threshold: 3, recovery_threshold: 2 }, listeners: [] })
-const releaseVersion = "0.1.0-beta.3.5"
+const releaseVersion = "1.0.0"
 const shellArg = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`
 const updateStageInfo: Record<string, { percent: number; label: string }> = {
   requested: { percent: 8, label: "Отправлен запрос…" },
@@ -72,7 +73,7 @@ export default function App() {
     <aside className="sidebar">
       <div className="brand"><div className="brand__mark"><Hexagon /></div><div><strong>EzhikLB</strong><span>load balancer</span></div></div>
       <nav aria-label="Основная навигация">{nav.map(([id, label, Icon]) => <button key={id} className={page === id ? "active" : ""} onClick={() => setPage(id)}><Icon /><span>{label}</span>{page === id && <span className="nav-indicator" />}</button>)}</nav>
-      <div className="sidebar__footer"><a className="github-link" href="https://github.com/ezhikdev/ezhiklb" target="_blank" rel="noreferrer"><Github /><span>GitHub проекта</span><ChevronRight /></a><div className="version"><span className="live-dot" />beta · {status?.version}</div><Button variant="ghost" className="logout" onClick={async () => { await api.logout(); setAuthenticated(false) }}><LogOut data-icon="inline-start" />Выйти</Button></div>
+      <div className="sidebar__footer"><a className="github-link" href="https://github.com/ezhikdev/ezhiklb" target="_blank" rel="noreferrer"><Github /><span>GitHub проекта</span><ChevronRight /></a><div className="version"><span className="live-dot" />{status?.version?.includes("-") ? "pre-release" : "stable"} · {status?.version}</div><Button variant="ghost" className="logout" onClick={async () => { await api.logout(); setAuthenticated(false) }}><LogOut data-icon="inline-start" />Выйти</Button></div>
     </aside>
     <main id="main-content" tabIndex={-1} className="main-content">
       {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="Закрыть">×</button></div>}
@@ -157,6 +158,13 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
   const [copied, setCopied] = useState(false)
   const [confirmNode, setConfirmNode] = useState<{ node: NodeInfo; action: "disable" | "delete" | "update" } | null>(null)
   const [toast, setToast] = useState<{ tone: "success" | "danger"; text: string } | null>(null)
+  const toastTimer = useRef<number | null>(null)
+  const notify = useCallback((next: { tone: "success" | "danger"; text: string }, duration: number) => {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+    setToast(next)
+    toastTimer.current = window.setTimeout(() => { setToast(null); toastTimer.current = null }, duration)
+  }, [])
+  useEffect(() => () => { if (toastTimer.current !== null) window.clearTimeout(toastTimer.current) }, [])
   const normalizedAgentURL = agentURL.trim().replace(/\/$/, "")
   const agentURLValid = /^https?:\/\/[^\s]+$/i.test(normalizedAgentURL)
   const insecureFlag = normalizedAgentURL.startsWith("http://") ? " EZHIKLB_ALLOW_INSECURE=1" : ""
@@ -173,12 +181,12 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
       const previous = previousUpdateState.current[node.id]
       const current = node.update_state ?? "idle"
       if (previous && previous !== current) {
-        if (current === "completed") { setToast({ tone: "success", text: `Нода «${node.name}» обновлена до ${node.agent_version || releaseVersion}` }); window.setTimeout(() => setToast(null), 4000) }
-        else if (current === "error") { setToast({ tone: "danger", text: `Не удалось обновить «${node.name}»: ${node.update_error || "ошибка обновления"}` }); window.setTimeout(() => setToast(null), 6000) }
+        if (current === "completed") notify({ tone: "success", text: `Нода «${node.name}» обновлена до ${node.agent_version || releaseVersion}` }, 4500)
+        else if (current === "error") notify({ tone: "danger", text: `Не удалось обновить «${node.name}»: ${node.update_error || "ошибка обновления"}` }, 6500)
       }
       previousUpdateState.current[node.id] = current
     }
-  }, [nodes])
+  }, [nodes, notify])
   useEffect(() => {
     if (!nodes.some((node) => Boolean(node.update_state && updateStageInfo[node.update_state]))) return
     const timer = window.setInterval(() => { void onChanged() }, 2000)
@@ -224,10 +232,19 @@ function Nodes({ nodes, profiles, settings, stats, health, onChanged }: { nodes:
       </>}
     </Dialog>}
     {editingNode && <Dialog title={`Редактирование · ${editingNode.name}`} description="Измените отображаемое имя ноды." onClose={() => setEditingNode(null)}><div className="dialog__body form-stack"><Field label="Название ноды"><Input value={editName} onChange={(event) => setEditName(event.target.value)} autoFocus /></Field><div className="notice"><Network /><div><strong>IPv4 определяется автоматически</strong><span className="mono">{editingNode.observed_address || editingNode.ingress_address || "Появится после первого heartbeat"}</span></div></div></div><div className="dialog__footer"><Button variant="ghost" onClick={() => setEditingNode(null)}>Отмена</Button><Button disabled={busy || !editName.trim()} onClick={async () => { setBusy(true); try { await api.updateNode(editingNode.id, editName.trim(), editingNode.ingress_address); setEditingNode(null); await onChanged() } finally { setBusy(false) } }}><Save data-icon="inline-start" />{busy ? "Сохраняю…" : "Сохранить"}</Button></div></Dialog>}
-    {confirmNode && <ConfirmDialog title={confirmNode.action === "delete" ? "Удалить ноду?" : confirmNode.action === "update" ? "Обновить агент ноды?" : "Выключить ноду?"} description={confirmNode.action === "delete" ? `EzhikLB очистит свои маршруты на «${confirmNode.node.name}», остановит агент и удалит ноду из панели.` : confirmNode.action === "update" ? `Нода «${confirmNode.node.name}» проверит официальный релиз ${releaseVersion}, заменит агент и автоматически перезапустит его. Маршруты IPVS продолжат работать.` : `Нода «${confirmNode.node.name}» перестанет принимать новые настройки панели. Текущая балансировка продолжит работать.`} confirmLabel={confirmNode.action === "delete" ? "Удалить ноду" : confirmNode.action === "update" ? "Обновить ноду" : "Выключить"} danger={confirmNode.action === "delete"} busy={busy} onCancel={() => setConfirmNode(null)} onConfirm={async () => { setBusy(true); try { if (confirmNode.action === "delete") await api.deleteNode(confirmNode.node.id); else if (confirmNode.action === "update") await api.requestNodeUpdate(confirmNode.node.id); else await api.setNodeEnabled(confirmNode.node.id, false); setConfirmNode(null); await onChanged() } catch (reason) { setToast({ tone: "danger", text: reason instanceof Error ? reason.message : "Не удалось выполнить действие" }); window.setTimeout(() => setToast(null), 5000) } finally { setBusy(false) } }} />}
-    {toast && <div className={`toast toast--${toast.tone}`} role="status"><CheckCircle2 />{toast.text}</div>}
+    {confirmNode && <ConfirmDialog title={confirmNode.action === "delete" ? "Удалить ноду?" : confirmNode.action === "update" ? "Обновить агент ноды?" : "Выключить ноду?"} description={confirmNode.action === "delete" ? `EzhikLB очистит свои маршруты на «${confirmNode.node.name}», остановит агент и удалит ноду из панели.` : confirmNode.action === "update" ? `Нода «${confirmNode.node.name}» проверит официальный релиз ${releaseVersion}, заменит агент и автоматически перезапустит его. Маршруты IPVS продолжат работать.` : `Нода «${confirmNode.node.name}» перестанет принимать новые настройки панели. Текущая балансировка продолжит работать.`} confirmLabel={confirmNode.action === "delete" ? "Удалить ноду" : confirmNode.action === "update" ? "Обновить ноду" : "Выключить"} danger={confirmNode.action === "delete"} busy={busy} onCancel={() => setConfirmNode(null)} onConfirm={async () => { setBusy(true); try { if (confirmNode.action === "delete") await api.deleteNode(confirmNode.node.id); else if (confirmNode.action === "update") await api.requestNodeUpdate(confirmNode.node.id); else await api.setNodeEnabled(confirmNode.node.id, false); setConfirmNode(null); await onChanged() } catch (reason) { notify({ tone: "danger", text: reason instanceof Error ? reason.message : "Не удалось выполнить действие" }, 6000) } finally { setBusy(false) } }} />}
+    {toast && <ToastNotice tone={toast.tone} text={toast.text} onClose={() => setToast(null)} />}
     {selectedNode && <NodeDetails node={nodes.find((node) => node.id === selectedNode.id) ?? selectedNode} profile={profiles.find((profile) => profile.id === selectedNode.profile_id)} stats={stats.filter((item) => item.node_id === selectedNode.id)} health={health.filter((item) => item.node_id === selectedNode.id)} onClose={() => setSelectedNode(null)} />}
   </div>
+}
+
+function ToastNotice({ tone, text, onClose }: { tone: "success" | "danger"; text: string; onClose: () => void }) {
+  const Icon = tone === "success" ? CheckCircle2 : CircleAlert
+  return createPortal(<div className="toast-layer"><aside className={`toast toast--${tone}`} role={tone === "danger" ? "alert" : "status"} aria-live={tone === "danger" ? "assertive" : "polite"}>
+    <span className="toast__icon" aria-hidden="true"><Icon /></span>
+    <div className="toast__content"><strong>{tone === "success" ? "Обновление завершено" : "Действие не выполнено"}</strong><span>{text}</span></div>
+    <button type="button" className="toast__close" aria-label="Закрыть уведомление" onClick={onClose}><X /></button>
+  </aside></div>, document.body)
 }
 
 function NodeDetails({ node, profile, stats, health, onClose }: { node: NodeInfo; profile?: Profile; stats: ServiceStat[]; health: BackendHealth[]; onClose: () => void }) {

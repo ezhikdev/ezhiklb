@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="0.1.0-beta.3.5"
+EZHIKLB_VERSION="1.0.0"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -48,7 +48,7 @@ restore_previous_release() {
 [[ "${EUID}" -eq 0 ]] || die "run this installer as root"
 [[ -r /etc/os-release ]] || die "unsupported operating system"
 . /etc/os-release
-case "${ID:-}" in ubuntu|debian) ;; *) die "only Debian and Ubuntu are supported in this pre-release" ;; esac
+case "${ID:-}" in ubuntu|debian) ;; *) die "only Debian and Ubuntu are supported" ;; esac
 
 EXISTING_VERSION=""
 [[ -f "$VERSION_FILE" ]] && EXISTING_VERSION="$(<"$VERSION_FILE")"
