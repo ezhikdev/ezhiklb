@@ -19,6 +19,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrManagedUpdateUnsupported = errors.New("the node agent must be updated manually to beta.3 or newer once")
 var profileVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$`)
 
 func resolveVersion(auto bool, requested string, number int64) (string, error) {
@@ -583,6 +584,9 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 }
 
 func (s *Store) RequestNodeUpdate(ctx context.Context, nodeID, version string) error {
+	var agentVersion string
+	if err := s.db.QueryRowContext(ctx, `SELECT agent_version FROM nodes WHERE id=? AND status<>'disabled'`, nodeID).Scan(&agentVersion); errors.Is(err, sql.ErrNoRows) { return ErrNotFound } else if err != nil { return err }
+	if !agentSupportsManagedUpdate(agentVersion) { return ErrManagedUpdateUnsupported }
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET update_target=?,update_state='requested',update_error='',updated_at=? WHERE id=? AND status<>'disabled'`, version, formatTime(time.Now().UTC()), nodeID)
 	if err != nil { return err }
 	affected, _ := result.RowsAffected()
@@ -637,10 +641,21 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	metricsAt := formatTime(metrics.CollectedAt)
 	if metrics.CollectedAt.IsZero() { metricsAt = formatTime(now) }
 	diagnosticsJSON, _ := json.Marshal(diagnostics)
-	if updateState == "" { updateState = "idle" }
-	var updateTarget string
-	_ = tx.QueryRowContext(ctx, `SELECT update_target FROM nodes WHERE id=?`, nodeID).Scan(&updateTarget)
+	var updateTarget, previousUpdateState, previousUpdateError string
+	_ = tx.QueryRowContext(ctx, `SELECT update_target,update_state,update_error FROM nodes WHERE id=?`, nodeID).Scan(&updateTarget, &previousUpdateState, &previousUpdateError)
+	// Agents released before beta.3 do not send update_state. Preserve the
+	// panel-side request for capable agents. Older agents cannot execute it,
+	// so finish the request as unsupported instead of showing endless progress.
+	if updateState == "" && updateTarget != "" && !agentSupportsManagedUpdate(version) {
+		updateState, updateError, updateTarget = "unsupported", "Первое обновление агента до beta.3 или новее выполняется вручную", ""
+	} else if updateState == "" {
+		updateState, updateError = previousUpdateState, previousUpdateError
+		if updateState == "" { updateState = "idle" }
+	}
 	if updateTarget != "" && version == updateTarget { updateState = "completed"; updateError = ""; updateTarget = "" }
+	// Keep completion visible until another update is requested. Otherwise a
+	// regular heartbeat can erase it before the UI observes the result.
+	if updateTarget == "" && previousUpdateState == "completed" && updateState == "idle" { updateState = "completed" }
 	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,updated_at=? WHERE id=? AND status<>'disabled'`,
 		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, formatTime(now), nodeID)
 	if err != nil {
@@ -680,6 +695,20 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 		}
 	}
 	return tx.Commit()
+}
+
+func agentSupportsManagedUpdate(version string) bool {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	parts := strings.SplitN(version, "-", 2)
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(parts[0], "%d.%d.%d", &major, &minor, &patch); err != nil { return false }
+	if major != 0 { return major > 0 }
+	if minor != 1 { return minor > 1 }
+	if patch != 0 { return patch > 0 }
+	if len(parts) == 1 { return true }
+	var beta int
+	_, err := fmt.Sscanf(parts[1], "beta.%d", &beta)
+	return err == nil && beta >= 3
 }
 
 func (s *Store) ListHealth(ctx context.Context) ([]domain.BackendHealth, error) {

@@ -224,6 +224,7 @@ h3 { font-size: 15px; }
 .update-progress__track { position: relative; flex: 1; height: 6px; overflow: hidden; border-radius: 99px; background: rgba(214,173,98,.14); }
 .update-progress__fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit; background: var(--warning); box-shadow: 0 0 10px rgba(214,173,98,.45); transition: width .5s ease; }
 .update-progress__label { flex: 0 0 auto; color: var(--warning); font: 500 12px "JetBrains Mono", monospace; white-space: nowrap; }
+.node-update-legacy { display: inline-flex !important; align-items: center; min-height: 32px; border: 1px solid rgba(214,173,98,.28); border-radius: 8px; background: rgba(214,173,98,.07); color: var(--warning) !important; padding: 0 10px; font-size: 12px !important; }
 .system-summary__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .system-summary__grid > div { min-height: 66px; display: flex; flex-direction: column; justify-content: center; border: 1px solid var(--border); border-radius: 9px; background: rgba(255,255,255,.018); padding: 10px 12px; }
 .system-summary__grid span { color: var(--quiet); font-size: 12px; }
@@ -244,22 +245,30 @@ h3 { font-size: 15px; }
 .metric-chart__legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .metric-chart__legend i { width: 7px; height: 7px; border-radius: 2px; }
 .chart-color--success { background: var(--success); }.chart-color--warning { background: var(--warning); }.chart-color--accent { background: var(--accent); }
-.metric-chart__canvas { position: relative; height: 164px; display: grid; place-items: center; margin-top: 12px; border-radius: 8px; background: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px) 0 0 / 100% 33.333%; color: var(--quiet); font-size: 13px; text-align: center; }
-.metric-chart__canvas svg { width: 100%; height: 100%; overflow: visible; touch-action: none; cursor: crosshair; }
+.metric-chart__canvas { position: relative; height: 164px; display: grid; place-items: center; margin-top: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.025); border-radius: 9px; background: radial-gradient(circle at 100% 100%, rgba(101,199,149,.045), transparent 42%), linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px) 0 0 / 100% 33.333%; color: var(--quiet); font-size: 13px; text-align: center; }
+.metric-chart__canvas svg { position: relative; z-index: 1; width: 100%; height: 100%; overflow: hidden; touch-action: none; cursor: crosshair; }
 .chart-line, .chart-grid-line, .chart-hover-line { fill: none; vector-effect: non-scaling-stroke; }
 .chart-grid-line { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 4 5; }
-.chart-line { stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: opacity .15s ease; }
+.chart-line { stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 0; transition: opacity .15s ease; animation: chart-draw .72s cubic-bezier(.22,1,.36,1) both; }
+.chart-area { stroke: none; opacity: .09; animation: chart-area-enter .55s ease-out both; }
+.chart-area--success { fill: var(--success); }.chart-area--warning { fill: var(--warning); }.chart-area--accent { fill: var(--accent); }
 .chart-line--success { stroke: var(--success); }.chart-line--warning { stroke: var(--warning); }.chart-line--accent { stroke: var(--accent); }
 .chart-hover-line { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 3 3; }
 .chart-hover-dot { stroke: var(--surface); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .chart-hover-dot--success { fill: var(--success); }.chart-hover-dot--warning { fill: var(--warning); }.chart-hover-dot--accent { fill: var(--accent); }
-.chart-tooltip { position: absolute; top: 8px; z-index: 5; display: flex; flex-direction: column; gap: 5px; min-width: 138px; transform: translateX(-50%); border: 1px solid var(--border-strong); border-radius: 9px; background: #14161a; padding: 9px 11px; pointer-events: none; box-shadow: 0 16px 32px rgba(0,0,0,.48); animation: chart-tooltip-enter .15s ease both; }
+.chart-live-dot { stroke: var(--surface); stroke-width: 1.5; vector-effect: non-scaling-stroke; animation: chart-live-pulse 1.8s ease-in-out infinite; }.chart-live-dot--success { fill: var(--success); }.chart-live-dot--warning { fill: var(--warning); }.chart-live-dot--accent { fill: var(--accent); }
+.chart-time-axis { position: absolute; z-index: 0; right: 9px; bottom: 3px; left: 9px; display: flex; justify-content: space-between; color: rgba(161,157,150,.58); font: 500 9px "JetBrains Mono", monospace; pointer-events: none; }
+.chart-tooltip { position: absolute; top: 8px; z-index: 5; display: flex; flex-direction: column; gap: 5px; min-width: 138px; border: 1px solid var(--border-strong); border-radius: 9px; background: #14161a; padding: 9px 11px; pointer-events: none; box-shadow: 0 16px 32px rgba(0,0,0,.48); animation: chart-tooltip-enter .15s ease both; }
+.chart-tooltip--start { transform: translateX(8px); }.chart-tooltip--middle { transform: translateX(-50%); }.chart-tooltip--end { transform: translateX(calc(-100% - 8px)); }
 .chart-tooltip time { color: var(--quiet); font: 500 11px "JetBrains Mono", monospace; text-transform: uppercase; letter-spacing: .06em; }
 .chart-tooltip > div { display: flex; align-items: center; gap: 7px; }
 .chart-tooltip > div > i { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 7px; }
 .chart-tooltip > div > span { min-width: 0; flex: 1; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .chart-tooltip > div > strong { flex: 0 0 auto; font: 600 12px "JetBrains Mono", monospace; }
-@keyframes chart-tooltip-enter { from { opacity: 0; transform: translate(-50%, -3px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes chart-tooltip-enter { from { opacity: 0; margin-top: -3px; } to { opacity: 1; margin-top: 0; } }
+@keyframes chart-draw { from { stroke-dashoffset: 1; opacity: .35; } to { stroke-dashoffset: 0; opacity: 1; } }
+@keyframes chart-area-enter { from { opacity: 0; } to { opacity: .09; } }
+@keyframes chart-live-pulse { 0%,100% { opacity: .65; } 50% { opacity: 1; } }
 .form-stack { display: flex; flex-direction: column; gap: 16px; }
 .node-enrollment { display: flex; flex-direction: column; gap: 18px; }
 .credential-warning { display: flex; align-items: flex-start; gap: 12px; border: 1px solid rgba(214,173,98,.25); border-radius: 10px; background: rgba(214,173,98,.07); color: var(--warning); padding: 13px; }

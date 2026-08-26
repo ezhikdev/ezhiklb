@@ -349,6 +349,8 @@ func (s *Server) requestHealthProbe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) requestNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.RequestNodeUpdate(r.Context(), r.PathValue("id"), Version); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+	} else if errors.Is(err, store.ErrManagedUpdateUnsupported) {
+		writeError(w, http.StatusConflict, "manual_update_required", "Первое обновление агента до beta.3 или новее нужно выполнить вручную")
 	} else if err != nil { s.internalError(w, err) } else { writeJSON(w, http.StatusAccepted, map[string]string{"version": Version}) }
 }
 
@@ -575,6 +577,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "0.1.0-beta.3.1"
+const Version = "0.1.0-beta.3.2"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

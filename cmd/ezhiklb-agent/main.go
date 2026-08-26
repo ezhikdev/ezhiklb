@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "0.1.0-beta.3.1"
+const version = "0.1.0-beta.3.2"
 
 type client struct {
 	baseURL string
@@ -115,7 +115,9 @@ func main() {
 			updateState = "restarting"
 			report()
 			logger.Info("agent update installed", "version", desired.UpdateVersion)
-			_, err = runner.Run(context.Background(), "systemctl", []string{"restart", "ezhiklb-agent.service"}, "")
+			// --no-block is required when a service asks systemd to restart itself:
+			// waiting for the job would wait for this very process to terminate.
+			_, err = runner.Run(context.Background(), "systemctl", []string{"--no-block", "restart", "ezhiklb-agent.service"}, "")
 			if err != nil { updateState, updateError = "error", err.Error(); return true }
 			return false
 		}
