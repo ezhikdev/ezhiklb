@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.1` and download the generated
-   `ezhiklb_1.0.1_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.2` and download the generated
+   `ezhiklb_1.0.2_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -14,6 +14,10 @@ to GitHub and let the release workflow create the Linux bundle.
 6. Accept the default panel/API ports (`8080`/`8081`) or enter two different free ports.
 7. Verify that a non-numeric, out-of-range, duplicate or already occupied port is rejected with a clear prompt.
 8. Open the address printed by the installer and use the generated token.
+
+Repeat the installation with the `Panel` role on a clean database and verify that
+the node list is empty. Updating a panel-only `1.0.1` installation must remove its
+phantom `Local node` while leaving every enrolled remote node intact.
 
 The default web port is `8080`; the dedicated node API is `8081`. Allow the
 agent port in the VPS firewall before enrolling a remote node.

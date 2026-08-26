@@ -221,13 +221,13 @@ func NewID(prefix string) (string, error) {
 	return prefix + "_" + hex.EncodeToString(buf), nil
 }
 
-func (s *Store) Bootstrap(ctx context.Context, ingressAddress string, initial domain.ProfileConfig, profileName string) error {
+func (s *Store) Bootstrap(ctx context.Context, ingressAddress string, initial domain.ProfileConfig, profileName string, localNode bool) error {
 	count := 0
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM profiles`).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
-		return nil
+		return s.reconcileLocalNode(ctx, ingressAddress, localNode)
 	}
 
 	if err := initial.Validate(); err != nil {
@@ -257,12 +257,33 @@ func (s *Store) Bootstrap(ctx context.Context, ingressAddress string, initial do
 		profileID, 1, "v1", string(configJSON), formatTime(now)); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-		"local", "Local node", ingressAddress, profileID, 1, "offline", formatTime(now), formatTime(now)); err != nil {
-		return err
+	if localNode {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+			"local", "Local node", ingressAddress, profileID, 1, "offline", formatTime(now), formatTime(now)); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) reconcileLocalNode(ctx context.Context, ingressAddress string, enabled bool) error {
+	if !enabled {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id='local'`)
+		return err
+	}
+
+	var profileID string
+	var revision int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id,current_revision FROM profiles ORDER BY created_at,id LIMIT 1`).Scan(&profileID, &revision); err != nil {
+		return err
+	}
+	now := formatTime(time.Now().UTC())
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"local", "Local node", ingressAddress, profileID, revision, "offline", now, now)
+	return err
 }
 
 func (s *Store) ListProfiles(ctx context.Context) ([]domain.Profile, error) {

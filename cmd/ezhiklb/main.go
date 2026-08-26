@@ -38,7 +38,8 @@ func main() {
 			logger.Info("legacy Ezhik UDP configuration detected", "path", legacyPath)
 		}
 	}
-	if err := st.Bootstrap(context.Background(), os.Getenv("EZHIKLB_INGRESS_ADDRESS"), initial, profileName); err != nil {
+	role := env("EZHIKLB_ROLE", "panel-node")
+	if err := st.Bootstrap(context.Background(), os.Getenv("EZHIKLB_INGRESS_ADDRESS"), initial, profileName, role == "panel-node"); err != nil {
 		logger.Error("bootstrap database", "error", err)
 		os.Exit(1)
 	}

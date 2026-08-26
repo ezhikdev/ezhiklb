@@ -36,12 +36,38 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
+func TestBootstrapReconcilesLocalNodeWithInstallRole(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", false); err != nil { t.Fatal(err) }
+	nodes, err := s.ListNodes(ctx)
+	if err != nil { t.Fatal(err) }
+	if len(nodes) != 0 { t.Fatalf("panel-only bootstrap created nodes: %#v", nodes) }
+
+	profiles, err := s.ListProfiles(ctx)
+	if err != nil { t.Fatal(err) }
+	remote, _, err := s.CreateNode(ctx, "server-1", "203.0.113.20", profiles[0].ID)
+	if err != nil { t.Fatal(err) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
+	nodes, err = s.ListNodes(ctx)
+	if err != nil { t.Fatal(err) }
+	if len(nodes) != 2 { t.Fatalf("panel-node bootstrap did not add local node: %#v", nodes) }
+
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", false); err != nil { t.Fatal(err) }
+	nodes, err = s.ListNodes(ctx)
+	if err != nil { t.Fatal(err) }
+	if len(nodes) != 1 || nodes[0].ID != remote.ID { t.Fatalf("panel-only reconciliation removed the wrong node: %#v", nodes) }
+}
+
 func TestProfileVersionsAndAuditRetention(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
 	if err != nil { t.Fatal(err) }
 	defer s.Close()
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default"); err != nil { t.Fatal(err) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
 	profiles, err := s.ListProfiles(ctx)
 	if err != nil { t.Fatal(err) }
 	if len(profiles) != 1 || profiles[0].Version != "v1" || !profiles[0].AutoVersion { t.Fatalf("unexpected bootstrap profile: %#v", profiles) }
@@ -65,7 +91,7 @@ func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
 	if err != nil { t.Fatal(err) }
 	defer s.Close()
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default"); err != nil { t.Fatal(err) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
 	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3.3' WHERE id='local'`); err != nil { t.Fatal(err) }
 	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil { t.Fatal(err) }
 	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", false); err != nil { t.Fatal(err) }
