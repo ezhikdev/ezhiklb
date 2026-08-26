@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "1.0.2"
+const version = "1.0.3"
 
 type client struct {
 	baseURL string

@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.2` and download the generated
-   `ezhiklb_1.0.2_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.3` and download the generated
+   `ezhiklb_1.0.3_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -118,3 +118,8 @@ Run these only on disposable test VPS nodes.
 27. Ensure the target node's currently installed agent is `beta.3` or newer (reinstall once via the classic command if it predates the self-update trigger), then click "Обновить" and verify an orange progress bar appears under the node row and visibly advances through downloading/verifying/installing/restarting stages (cross-check timestamps against `sudo journalctl -u ezhiklb-agent`). Verify the update button itself is hidden while the bar is visible.
 28. Verify the completion toast (green) or failure toast (red) appears only once the node's own reported state actually reaches `completed`/`error` — not immediately after clicking the confirm dialog.
 29. Hover over each of the four Overview charts and verify a tooltip follows the pointer showing the exact time and per-series value, with a crosshair and per-series dot on the line; verify it also works via a single tap on a touch device.
+
+## 1.0.3 acceptance checks
+
+30. Fresh-install the `Panel` role only (no local node, no remote nodes enrolled yet), open the panel in a browser and confirm it loads and stays rendered — no blank/white screen after the first `load()` poll. Check `curl -s http://127.0.0.1:8080/api/v1/nodes` (through the SSH tunnel or locally) returns `[]`, never `null`, and likewise for `/api/v1/profiles` if every profile were ever deleted.
+31. With devtools open, watch the Network tab during that same fresh `Panel`-only load and confirm no uncaught exception appears in the Console when the empty-nodes response arrives.

@@ -292,7 +292,7 @@ func (s *Store) ListProfiles(ctx context.Context) ([]domain.Profile, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var result []domain.Profile
+	result := make([]domain.Profile, 0)
 	for rows.Next() {
 		profile, err := scanProfile(rows)
 		if err != nil {
@@ -461,7 +461,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var nodes []domain.Node
+	nodes := make([]domain.Node, 0)
 	for rows.Next() {
 		node, err := scanNode(rows)
 		if err != nil {
