@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.0.0"
+EZHIKLB_VERSION="1.0.1"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -91,6 +91,52 @@ load_existing_env_value() {
   export "$key"
 }
 
+valid_tcp_port() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 ))
+}
+
+tcp_port_in_use() {
+  local port="$1" hex_port=""
+  printf -v hex_port '%04X' "$port"
+  awk -v wanted="$hex_port" '
+    NR > 1 {
+      split($2, address, ":")
+      if (toupper(address[2]) == wanted && $4 == "0A") found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+choose_install_port() {
+  local variable="$1" label="$2" default_port="$3" value="" supplied=0
+  [[ -n "${!variable:-}" ]] && supplied=1
+
+  while true; do
+    if (( supplied )); then
+      value="${!variable}"
+    else
+      read -r -p "${label} [${default_port}]: " value
+      value="${value:-$default_port}"
+    fi
+
+    if ! valid_tcp_port "$value"; then
+      (( supplied )) && die "${label}: порт должен быть числом от 1 до 65535"
+      printf 'Порт должен быть числом от 1 до 65535.\n' >&2
+      continue
+    fi
+    if tcp_port_in_use "$value"; then
+      (( supplied )) && die "${label}: порт ${value} уже используется"
+      printf 'Порт %s уже используется. Укажите другой порт.\n' "$value" >&2
+      continue
+    fi
+    break
+  done
+
+  printf -v "$variable" '%s' "$value"
+  export "$variable"
+}
+
 if [[ -n "$EXISTING_VERSION" ]]; then
   load_existing_env_value EZHIKLB_PANEL_URL
   load_existing_env_value EZHIKLB_NODE_ID
@@ -109,6 +155,25 @@ if [[ -z "$EXISTING_VERSION" && ( "$ROLE" == "panel" || "$ROLE" == "panel-node" 
     2) panel_host="0.0.0.0" ;;
     *) die "неверный вариант доступа к панели" ;;
   esac
+fi
+
+panel_port="${EZHIKLB_PORT:-8080}"
+agent_port="${EZHIKLB_AGENT_PORT:-8081}"
+if [[ -z "$EXISTING_VERSION" && ( "$ROLE" == "panel" || "$ROLE" == "panel-node" ) ]]; then
+  agent_port_was_supplied=0
+  [[ -n "${EZHIKLB_AGENT_PORT:-}" ]] && agent_port_was_supplied=1
+  printf '\nНастройка портов панели:\n'
+  choose_install_port EZHIKLB_PORT 'Порт web-панели' 8080
+  panel_port="$EZHIKLB_PORT"
+
+  while true; do
+    choose_install_port EZHIKLB_AGENT_PORT 'Порт API нод' 8081
+    agent_port="$EZHIKLB_AGENT_PORT"
+    [[ "$agent_port" != "$panel_port" ]] && break
+    (( agent_port_was_supplied )) && die "порты панели и API нод должны различаться"
+    printf 'Порт API нод должен отличаться от порта web-панели.\n' >&2
+    unset EZHIKLB_AGENT_PORT
+  done
 fi
 
 if [[ "$ROLE" == "node" ]]; then
@@ -188,8 +253,6 @@ if [[ ! -f "$ENV_FILE" ]]; then
   admin_token="${EZHIKLB_ADMIN_TOKEN:-$(openssl rand -hex 32)}"
   agent_token="${EZHIKLB_AGENT_TOKEN:-$(openssl rand -hex 32)}"
   ingress="${EZHIKLB_INGRESS_ADDRESS:-$(detect_server_ipv4)}"
-  panel_port="${EZHIKLB_PORT:-8080}"
-  agent_port="${EZHIKLB_AGENT_PORT:-8081}"
   panel_url="${EZHIKLB_PANEL_URL:-http://127.0.0.1:${agent_port}}"
   cat >"$ENV_FILE" <<EOF
 EZHIKLB_ROLE=${ROLE}

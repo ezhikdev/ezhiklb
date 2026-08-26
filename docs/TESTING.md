@@ -5,16 +5,20 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.0` and download the generated
-   `ezhiklb_1.0.0_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.1` and download the generated
+   `ezhiklb_1.0.1_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
 5. Select local or network access for the administrator web interface. The node API uses its own network listener in both modes.
-6. Open the address printed by the installer and use the generated token.
+6. Accept the default panel/API ports (`8080`/`8081`) or enter two different free ports.
+7. Verify that a non-numeric, out-of-range, duplicate or already occupied port is rejected with a clear prompt.
+8. Open the address printed by the installer and use the generated token.
 
 The default web port is `8080`; the dedicated node API is `8081`. Allow the
 agent port in the VPS firewall before enrolling a remote node.
+An upgrade must preserve the ports already stored in `/etc/ezhiklb/ezhiklb.env`
+without asking for them again.
 
 The installer can bind the panel to loopback or all network interfaces. HTTP is
 supported when the generated node command explicitly enables insecure mode;
