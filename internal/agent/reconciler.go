@@ -433,31 +433,45 @@ func (r *Reconciler) setDestinationWeight(ctx context.Context, service Service, 
 	return err
 }
 
-// udpIdleTimeoutSeconds bounds how long a UDP flow's IPVS connection entry and
-// conntrack NAT mapping survive without traffic. Both the Linux kernel's IPVS
-// UDP timeout (300s) and nf_conntrack's UDP stream timeout (commonly 120-180s)
-// default to values shorter than a realistic "phone locked in a pocket"
-// interval. This is a single global kernel setting (ipvsadm --set has no
-// per-listener granularity), so it is set to 24h — the longest Affinity
-// preset a listener can choose in the panel — rather than tied to any one
-// listener's own Affinity value. Affinity/persistence keeps routing a client
-// to the same backend for as long as the operator configured regardless of
-// this timeout; what this constant prevents is the underlying connection
-// *state* expiring first and forcing a full re-handshake ("Соединение...")
-// even though persistence would have sent the resumed flow to the right
-// place anyway. See docs/ROADMAP.md's "Confirmed alpha.5 findings" for the
-// original report.
-const udpIdleTimeoutSeconds = 86400
+// Fixing the alpha.5 UDP idle-resume bug (docs/ROADMAP.md) turned out to
+// need only ONE of these two timeouts extended, not both — extending both
+// (as the first attempt at this fix did) let IPVS's own per-flow cache
+// balloon to a full day of dead entries, which both the kernel and this
+// agent's own MetricsCollector (scanning /proc/net/ip_vs_conn every
+// heartbeat) then had to churn through, driving sustained high CPU on busy
+// nodes. The actual mechanism: EZHIKLB-FORWARD's return-path rule only
+// ACCEPTs a backend's reply once conntrack classifies the flow as
+// ESTABLISHED/RELATED — that classification depends solely on netfilter's
+// conntrack timeout, not on IPVS's own ip_vs_conn entry. A resumed flow is
+// re-routed to the correct backend by the listener's own Affinity
+// (persistence template, `-p <seconds>`) regardless of whether the old
+// ip_vs_conn entry still exists, so that table doesn't need to survive the
+// client's idle period — only the conntrack NAT mapping does.
+const (
+	// udpConntrackTimeoutSeconds: what the firewall's ESTABLISHED check
+	// actually depends on. Kept at the longest Affinity preset a listener
+	// can choose (24h) so it never undercuts whatever Affinity is set.
+	udpConntrackTimeoutSeconds = 86400
+	// udpIPVSTimeoutSeconds: IPVS's own connection cache. Short on purpose —
+	// bounds /proc/net/ip_vs_conn's size; Affinity handles routing
+	// continuity independently of this value.
+	udpIPVSTimeoutSeconds = 300
+	// nfConntrackMaxEntries gives conntrack room for entries that now live
+	// up to 24h instead of ~3 minutes, so concurrent flows don't fill the
+	// table and start getting dropped.
+	nfConntrackMaxEntries = 2000000
+)
 
 func (r *Reconciler) configureKernel(ctx context.Context) error {
 	values := map[string]string{
 		"net.ipv4.ip_forward":                           "1",
-		"net.ipv4.vs.conntrack":                         "1",
+		"net.ipv4.vs.conntrack":                          "1",
 		"net.ipv4.vs.snat_reroute":                       "1",
 		"net.ipv4.vs.expire_nodest_conn":                 "1",
 		"net.ipv4.vs.expire_quiescent_template":          "1",
 		"net.netfilter.nf_conntrack_udp_timeout":         "60",
-		"net.netfilter.nf_conntrack_udp_timeout_stream":  strconv.Itoa(udpIdleTimeoutSeconds),
+		"net.netfilter.nf_conntrack_udp_timeout_stream":  strconv.Itoa(udpConntrackTimeoutSeconds),
+		"net.netfilter.nf_conntrack_max":                 strconv.Itoa(nfConntrackMaxEntries),
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -469,10 +483,9 @@ func (r *Reconciler) configureKernel(ctx context.Context) error {
 			return err
 		}
 	}
-	// IPVS keeps its own UDP connection timeout independent of conntrack;
-	// extend it to match so neither table drops a live flow's state before
-	// the other. Global default is 900/120/300 (tcp/tcpfin/udp) seconds.
-	if _, err := r.runner.Run(ctx, "ipvsadm", []string{"--set", "900", "120", strconv.Itoa(udpIdleTimeoutSeconds)}, ""); err != nil {
+	// IPVS's own UDP connection timeout is independent of conntrack and
+	// deliberately kept short — see the block comment above.
+	if _, err := r.runner.Run(ctx, "ipvsadm", []string{"--set", "900", "120", strconv.Itoa(udpIPVSTimeoutSeconds)}, ""); err != nil {
 		return fmt.Errorf("set IPVS UDP connection timeout: %w", err)
 	}
 	return nil

@@ -52,17 +52,37 @@ The agent also configures `expire_nodest_conn` and
 IPVS's own UDP connection timeout and the kernel's `nf_conntrack_udp_timeout*`
 sysctls default to values (300s and ~120-180s respectively) shorter than a
 realistic client idle period — a phone locked for a few minutes, for example.
-Because Affinity (IPVS persistence, `-p <seconds>`) is advertised up to 24h,
-the agent explicitly extends both to `udpIdleTimeoutSeconds` (86400s — the
-longest Affinity preset a listener can choose) in `Reconciler.configureKernel`
-(`internal/agent/reconciler.go`) via `ipvsadm --set` and the matching
-sysctls, so a resumed flow's conntrack NAT mapping and IPVS connection entry
-survive together instead of one expiring before the other and forcing a full
-re-handshake. This is a single global kernel setting (`ipvsadm --set` has no
-per-listener granularity) rather than one derived from any specific
-listener's own Affinity value; Affinity itself still governs which backend a
-client is routed back to. This addresses the "Confirmed alpha.5 findings" UDP
-idle-resume report in `docs/ROADMAP.md`.
+This addresses the "Confirmed alpha.5 findings" UDP idle-resume report in
+`docs/ROADMAP.md`.
+
+The two timeouts are tuned *differently*, deliberately — an earlier attempt
+extended both to 24h and caused a production incident (sustained 40-50%+ CPU
+on busy nodes, conntrack approaching its limit), because IPVS's own
+`ip_vs_conn` table then accumulated a full day of entries instead of a few
+minutes, and this agent's own `MetricsCollector` scans that table every
+heartbeat for the active-IP metric.
+
+- **`nf_conntrack_udp_timeout_stream`** (`udpConntrackTimeoutSeconds`, 24h —
+  the longest Affinity preset a listener can choose) is what actually needs
+  to be long. `EZHIKLB-FORWARD`'s return-path rule only `ACCEPT`s a backend's
+  reply once conntrack classifies the flow as `ESTABLISHED,RELATED`, and that
+  classification depends solely on this timeout.
+- **IPVS's own UDP connection timeout** (`udpIPVSTimeoutSeconds`, via
+  `ipvsadm --set`) is kept short (300s, close to the kernel default) on
+  purpose. It doesn't need to survive the client's idle period: a resumed
+  flow is re-routed to the correct backend by the listener's own Affinity
+  (persistence template, `-p <seconds>`) independently of whether the old
+  `ip_vs_conn` entry still exists, so extending it only inflated a table
+  without buying any correctness.
+- **`nf_conntrack_max`** is raised (to 2,000,000) to give the long-lived
+  conntrack table room, since entries now linger up to 24h instead of ~3
+  minutes.
+
+Both are set in `Reconciler.configureKernel` (`internal/agent/reconciler.go`);
+this is global kernel state for the whole node (`ipvsadm --set` has no
+per-listener granularity), not derived from any specific listener's own
+Affinity value — Affinity itself still governs which backend a client is
+routed back to.
 
 ## Security boundary
 

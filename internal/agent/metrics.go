@@ -20,13 +20,22 @@ type metricSample struct {
 	rxBytes, txBytes uint64
 }
 
+// activeIPsScanInterval rate-limits how often /proc/net/ip_vs_conn gets
+// scanned. That file's size tracks how many IPVS connection-table entries
+// currently exist, which can be very large on a busy node (see
+// udpIPVSTimeoutSeconds in reconciler.go for why it's now bounded); reading
+// it on every 15s heartbeat was needlessly expensive when the 1-minute
+// active-IP window it feeds doesn't need finer resolution than this.
+const activeIPsScanInterval = 30 * time.Second
+
 // MetricsCollector keeps only a one-minute in-memory window. Nothing is
 // written to disk and the panel receives one aggregate with each heartbeat.
 type MetricsCollector struct {
-	mu      sync.Mutex
-	samples []metricSample
-	seenIPs map[string]time.Time
-	now     func() time.Time
+	mu                sync.Mutex
+	samples           []metricSample
+	seenIPs           map[string]time.Time
+	lastActiveIPsScan time.Time
+	now               func() time.Time
 }
 
 func NewMetricsCollector() *MetricsCollector {
@@ -44,7 +53,10 @@ func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
 	ram, err := readRAM("/proc/meminfo")
 	if err != nil { return domain.NodeMetrics{}, err }
 	load := readLoad("/proc/loadavg")
-	for _, address := range readActiveIPVSClients("/proc/net/ip_vs_conn") { c.seenIPs[address] = now }
+	if now.Sub(c.lastActiveIPsScan) >= activeIPsScanInterval {
+		for _, address := range readActiveIPVSClients("/proc/net/ip_vs_conn") { c.seenIPs[address] = now }
+		c.lastActiveIPsScan = now
+	}
 	cutoff := now.Add(-time.Minute)
 	for address, seen := range c.seenIPs { if seen.Before(cutoff) { delete(c.seenIPs, address) } }
 

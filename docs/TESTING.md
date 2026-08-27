@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.8` and download the generated
-   `ezhiklb_1.0.8_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.0.9` and download the generated
+   `ezhiklb_1.0.9_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -150,6 +150,18 @@ Run these only on disposable test VPS nodes.
 
 ## 1.0.8 acceptance checks — UDP idle-resume (closes the alpha.5 finding)
 
-44. After applying `1.0.8` to a node, verify the new timeouts actually landed: `sudo sysctl net.netfilter.nf_conntrack_udp_timeout net.netfilter.nf_conntrack_udp_timeout_stream` should read `60` and `86400`; `sudo ipvsadm -L --timeout` (or `cat /proc/net/ip_vs_conn` behavior) should reflect an 86400s UDP timeout instead of the kernel default 300s. This is a single global setting for the whole node — it does not vary per listener even though listeners can each pick a different Affinity value.
+44. ~~After applying `1.0.8` to a node, verify `ipvsadm -L --timeout` reflects an 86400s UDP
+    timeout.~~ **Superseded by `1.0.9` below** — extending IPVS's own UDP timeout to 24h caused
+    the production incident fixed in `1.0.9` (see next section). `ipvsadm -L --timeout` should
+    show `900 120 300`, *not* `86400`, from `1.0.9` onward; only conntrack's timeout is 24h.
 45. Follow the existing "First-packet reproduction" procedure above with a *real* client (not just idle traffic): connect, then background/lock the client for 5, 10, and 20 minutes before resuming, capturing `ipvsadm -Lnc` and `conntrack -L -p udp -o extended` immediately before and after each resume. Confirm the flow's IPVS and conntrack entries are still present (or freshly re-created against the *same* backend via the persistence template) and traffic resumes without the client showing a reconnect/handshake state.
 46. Confirm this doesn't regress the existing "First-packet reproduction" 10-minute idle scenario documented above, and that `Restore()` on agent/VPS reboot still applies these sysctls (`configureKernel` runs in both `Reconcile()` and `Restore()`).
+
+## 1.0.9 acceptance checks — fix the CPU/table-bloat regression from 1.0.8
+
+47. On a busy node, before updating, capture a baseline: `ps -p $(systemctl show -p MainPID --value ezhiklb-agent) -o %cpu,%mem`, `conntrack -C`, and `wc -l /proc/net/ip_vs_conn`.
+48. Update to `1.0.9`, wait a few minutes for the (now-300s) IPVS timeout to reap the old 24h-accumulated `ip_vs_conn` entries, then re-check the same three numbers. Agent CPU should drop back to idle-normal levels (a few percent, not sustained 40-50%+), and `wc -l /proc/net/ip_vs_conn` should shrink dramatically (minutes' worth of entries, not a day's).
+49. Verify `sudo ipvsadm -L --timeout` now reads `900 120 300` and `sudo sysctl net.netfilter.nf_conntrack_udp_timeout_stream` still reads `86400` — the split is deliberate, not a partial revert.
+50. Verify `sudo sysctl net.netfilter.nf_conntrack_max` reads `2000000` (up from the distro default, commonly `262144` or `524288`) and that `conntrack -C` stays comfortably under it even after a day of normal traffic.
+51. Re-run the original repro (lock a real client's phone for 5-20 minutes, resume) and confirm the alpha.5 bug is still fixed — this change only shortens IPVS's own connection-table entry, not the conntrack timeout the fix actually depends on, so it should not reintroduce the original disconnect.
+52. Watch `journalctl -u ezhiklb-agent` for a day of real traffic and confirm the `active_ips` metric (now refreshed at most every `activeIPsScanInterval` = 30s instead of every 15s heartbeat) still reports sane, changing values on the Overview charts — not stuck/stale.
