@@ -23,6 +23,16 @@ IPVS NAT mode and may have a destination port different from the listen port.
 The agent owns only services recorded in its state file and never calls
 `ipvsadm -C`.
 
+An optional listener bandwidth limit is applied independently by each node.
+The agent marks packets by IPVS virtual service in its own mangle chain, then
+uses two `clsact` egress policers: one for original client-to-backend traffic
+and one for reply backend-to-client traffic. TCP and UDP services belonging to
+the same listener use the same mark and therefore share that direction's
+budget. The two directions receive the same configured Mbit/s value but do not
+consume one another's budget. EzhikLB never replaces the interface root qdisc.
+When no current or previously persisted listener limit exists, reconciliation
+does not issue any mutating `tc` or rate-limit mangle command.
+
 Reconciliation is differential:
 
 1. Validate the complete desired revision.

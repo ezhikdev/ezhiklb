@@ -25,6 +25,8 @@ export interface Listener {
   protocols: Protocol[]
   scheduler: "wrr" | "rr"
   affinity_seconds: number
+  rate_limit_enabled?: boolean
+  rate_limit_mbps?: number
   backends: Backend[]
 }
 
@@ -43,6 +45,7 @@ export interface Profile {
   version: string
   created_at: string
   updated_at: string
+  sort_order: number
 }
 
 export interface Revision {
@@ -83,6 +86,7 @@ export interface NodeInfo {
   update_state?: "idle" | "requested" | "downloading" | "verifying" | "installing" | "restarting" | "completed" | "unsupported" | "error"
   update_error?: string
   updated_at: string
+  sort_order: number
 }
 
 export interface NodeDiagnostics {
@@ -90,6 +94,11 @@ export interface NodeDiagnostics {
   firewall_ready: boolean
   service_count: number
   destination_count: number
+  traffic_control_available?: boolean
+  rate_limit_active?: boolean
+  rate_limit_entries?: number
+  rate_limit_drops?: number
+  rate_limit_error?: string
   error?: string
   checked_at: string
 }

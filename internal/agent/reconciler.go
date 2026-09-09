@@ -42,12 +42,15 @@ func (ExecRunner) Run(ctx context.Context, name string, args []string, input str
 }
 
 type Service struct {
-	Protocol      domain.Protocol `json:"protocol"`
-	Address       string          `json:"address"`
-	Port          uint16          `json:"port"`
-	Scheduler     string          `json:"scheduler"`
-	AffinitySecs  int             `json:"affinity_seconds"`
-	Destinations  []Destination   `json:"destinations"`
+	Protocol         domain.Protocol `json:"protocol"`
+	Address          string          `json:"address"`
+	Port             uint16          `json:"port"`
+	Scheduler        string          `json:"scheduler"`
+	AffinitySecs     int             `json:"affinity_seconds"`
+	ListenerID       string          `json:"listener_id,omitempty"`
+	RateLimitEnabled bool            `json:"rate_limit_enabled,omitempty"`
+	RateLimitMbps    int             `json:"rate_limit_mbps,omitempty"`
+	Destinations     []Destination   `json:"destinations"`
 }
 
 type Destination struct {
@@ -58,9 +61,10 @@ type Destination struct {
 }
 
 type AppliedState struct {
-	Revision    int64              `json:"revision"`
-	Services    []Service          `json:"services"`
-	HealthCheck domain.HealthCheck `json:"health_check"`
+	Revision        int64              `json:"revision"`
+	Services        []Service          `json:"services"`
+	HealthCheck     domain.HealthCheck `json:"health_check"`
+	TrafficControls []TrafficControl   `json:"traffic_controls,omitempty"`
 }
 
 type Reconciler struct {
@@ -90,6 +94,16 @@ func (r *Reconciler) Services() []Service {
 	return append([]Service(nil), state.Services...)
 }
 
+func (r *Reconciler) TrafficControls() []TrafficControl {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, err := r.loadState()
+	if err != nil {
+		return nil
+	}
+	return append([]TrafficControl(nil), state.TrafficControls...)
+}
+
 func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredState) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -104,7 +118,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if err := r.validateLocalAddresses(ctx, services); err != nil {
 		return err
 	}
-	if err := r.validatePortAvailability(ctx, services); err != nil { return err }
+	if err := r.validatePortAvailability(ctx, services); err != nil {
+		return err
+	}
 	old, err := r.loadState()
 	if err != nil {
 		return err
@@ -136,7 +152,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if err := r.applyFirewall(ctx, services); err != nil {
 		return fmt.Errorf("finalize firewall: %w", err)
 	}
-	return r.saveState(AppliedState{Revision: desired.Revision, Services: services, HealthCheck: desired.Config.HealthCheck})
+	controls, trafficErr := r.reconcileTrafficControl(ctx, old.TrafficControls, services)
+	if trafficErr != nil {
+		_, rollbackTrafficErr := r.reconcileTrafficControl(ctx, controls, old.Services)
+		rollbackIPVSErr := r.applyIPVS(ctx, services, old.Services)
+		_ = r.applyFirewall(ctx, old.Services)
+		if rollbackTrafficErr != nil || rollbackIPVSErr != nil {
+			return fmt.Errorf("apply rate limit: %v; rollback also failed (traffic control: %v, IPVS: %v)", trafficErr, rollbackTrafficErr, rollbackIPVSErr)
+		}
+		return fmt.Errorf("apply rate limit: %w (previous state restored)", trafficErr)
+	}
+	return r.saveState(AppliedState{Revision: desired.Revision, Services: services, HealthCheck: desired.Config.HealthCheck, TrafficControls: controls})
 }
 
 // resetConnectionState deliberately interrupts only flows owned by EzhikLB.
@@ -151,14 +177,20 @@ func (r *Reconciler) resetConnectionState(ctx context.Context, oldServices, desi
 	}
 	if err := r.applyIPVS(ctx, oldServices, nil); err != nil {
 		restoreErr := r.applyIPVS(ctx, oldServices, oldServices)
-		if restoreErr != nil { return fmt.Errorf("remove managed services: %v; restore also failed: %w", err, restoreErr) }
+		if restoreErr != nil {
+			return fmt.Errorf("remove managed services: %v; restore also failed: %w", err, restoreErr)
+		}
 		return fmt.Errorf("remove managed services: %w (previous state restored)", err)
 	}
 	r.purgeConntrack(ctx, unionServices(oldServices, desiredServices))
 	if err := r.applyIPVS(ctx, nil, desiredServices); err != nil {
-		for _, service := range desiredServices { _ = r.deleteService(ctx, service) }
+		for _, service := range desiredServices {
+			_ = r.deleteService(ctx, service)
+		}
 		restoreErr := r.applyIPVS(ctx, oldServices, oldServices)
-		if restoreErr != nil { return fmt.Errorf("recreate managed services: %v; restore also failed: %w", err, restoreErr) }
+		if restoreErr != nil {
+			return fmt.Errorf("recreate managed services: %v; restore also failed: %w", err, restoreErr)
+		}
 		return fmt.Errorf("recreate managed services: %w (previous state restored)", err)
 	}
 	return nil
@@ -168,7 +200,9 @@ func (r *Reconciler) purgeConntrack(ctx context.Context, services []Service) {
 	seen := map[string]bool{}
 	for _, service := range services {
 		key := serviceKey(service)
-		if seen[key] { continue }
+		if seen[key] {
+			continue
+		}
 		seen[key] = true
 		args := []string{"-D", "-f", "ipv4", "-p", string(service.Protocol), "-d", service.Address, "--dport", strconv.Itoa(int(service.Port))}
 		if _, err := r.runner.Run(ctx, "conntrack", args, ""); err != nil {
@@ -182,10 +216,16 @@ func (r *Reconciler) purgeConntrack(ctx context.Context, services []Service) {
 
 func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Service) error {
 	output, err := r.runner.Run(ctx, "ss", []string{"-H", "-lntup"}, "")
-	if err != nil { return fmt.Errorf("inspect occupied ports: %w", err) }
+	if err != nil {
+		return fmt.Errorf("inspect occupied ports: %w", err)
+	}
 	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line); if len(fields) < 5 { continue }
-		protocol := strings.ToLower(fields[0]); endpoint := fields[4]
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		protocol := strings.ToLower(fields[0])
+		endpoint := fields[4]
 		for _, service := range services {
 			if protocol == string(service.Protocol) && strings.HasSuffix(endpoint, ":"+strconv.Itoa(int(service.Port))) {
 				return fmt.Errorf("port conflict: %s %s:%d is occupied by %s", strings.ToUpper(protocol), service.Address, service.Port, strings.TrimSpace(line))
@@ -202,16 +242,38 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, err := r.loadState()
-	if err != nil { return 0, err }
-	if len(state.Services) == 0 { return state.Revision, nil }
-	if err := r.validateLocalAddresses(ctx, state.Services); err != nil { return 0, err }
-	if err := r.configureKernel(ctx); err != nil { return 0, err }
-	if err := r.applyFirewall(ctx, state.Services); err != nil { return 0, fmt.Errorf("restore firewall: %w", err) }
+	if err != nil {
+		return 0, err
+	}
+	if len(state.Services) == 0 {
+		return state.Revision, nil
+	}
+	if err := r.validateLocalAddresses(ctx, state.Services); err != nil {
+		return 0, err
+	}
+	if err := r.configureKernel(ctx); err != nil {
+		return 0, err
+	}
+	if err := r.applyFirewall(ctx, state.Services); err != nil {
+		return 0, fmt.Errorf("restore firewall: %w", err)
+	}
 	for _, service := range state.Services {
-		if err := r.ensureService(ctx, service, true); err != nil { return 0, fmt.Errorf("restore IPVS service: %w", err) }
-		for _, destination := range service.Destinations {
-			if err := r.ensureDestination(ctx, service, destination, true); err != nil { return 0, fmt.Errorf("restore IPVS destination: %w", err) }
+		if err := r.ensureService(ctx, service, true); err != nil {
+			return 0, fmt.Errorf("restore IPVS service: %w", err)
 		}
+		for _, destination := range service.Destinations {
+			if err := r.ensureDestination(ctx, service, destination, true); err != nil {
+				return 0, fmt.Errorf("restore IPVS destination: %w", err)
+			}
+		}
+	}
+	controls, err := r.reconcileTrafficControl(ctx, state.TrafficControls, state.Services)
+	if err != nil {
+		return 0, fmt.Errorf("restore rate limits: %w", err)
+	}
+	state.TrafficControls = controls
+	if err := r.saveState(state); err != nil {
+		return 0, err
 	}
 	return state.Revision, nil
 }
@@ -220,7 +282,9 @@ func (r *Reconciler) RestoredHealthCheck() domain.HealthCheck {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, err := r.loadState()
-	if err != nil { return domain.HealthCheck{} }
+	if err != nil {
+		return domain.HealthCheck{}
+	}
 	return state.HealthCheck
 }
 
@@ -231,7 +295,9 @@ func (r *Reconciler) SaveHealthCheck(config domain.HealthCheck) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, err := r.loadState()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	state.HealthCheck = config
 	return r.saveState(state)
 }
@@ -242,20 +308,33 @@ func (r *Reconciler) Decommission(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	old, err := r.loadState()
-	if err != nil { return err }
-	if err := r.applyIPVS(ctx, old.Services, nil); err != nil { return fmt.Errorf("remove IPVS services: %w", err) }
-	if err := r.removeFirewall(ctx); err != nil { return fmt.Errorf("remove EzhikLB firewall rules: %w", err) }
+	if err != nil {
+		return err
+	}
+	if err := r.applyIPVS(ctx, old.Services, nil); err != nil {
+		return fmt.Errorf("remove IPVS services: %w", err)
+	}
+	if err := r.removeFirewall(ctx); err != nil {
+		return fmt.Errorf("remove EzhikLB firewall rules: %w", err)
+	}
+	if _, err := r.reconcileTrafficControl(ctx, old.TrafficControls, nil); err != nil {
+		return fmt.Errorf("remove rate limits: %w", err)
+	}
 	return r.saveState(AppliedState{})
 }
 
 func (r *Reconciler) removeFirewall(ctx context.Context) error {
 	for _, rule := range []struct{ table, parent, child string }{{"filter", "FORWARD", "EZHIKLB-FORWARD"}, {"nat", "POSTROUTING", "EZHIKLB-SNAT"}} {
 		prefix := []string{"-w", "5"}
-		if rule.table != "filter" { prefix = append(prefix, "-t", rule.table) }
+		if rule.table != "filter" {
+			prefix = append(prefix, "-t", rule.table)
+		}
 		check := append(append([]string{}, prefix...), "-C", rule.parent, "-j", rule.child)
 		if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
 			remove := append(append([]string{}, prefix...), "-D", rule.parent, "-j", rule.child)
-			if _, err := r.runner.Run(ctx, "iptables", remove, ""); err != nil { return err }
+			if _, err := r.runner.Run(ctx, "iptables", remove, ""); err != nil {
+				return err
+			}
 		}
 		flush := append(append([]string{}, prefix...), "-F", rule.child)
 		_, _ = r.runner.Run(ctx, "iptables", flush, "")
@@ -304,7 +383,9 @@ func unionServices(first, second []Service) []Service {
 		for _, destination := range destinations {
 			target.Destinations = append(target.Destinations, destination)
 		}
-		sort.Slice(target.Destinations, func(i, j int) bool { return destinationKey(target.Destinations[i]) < destinationKey(target.Destinations[j]) })
+		sort.Slice(target.Destinations, func(i, j int) bool {
+			return destinationKey(target.Destinations[i]) < destinationKey(target.Destinations[j])
+		})
 		services[key] = target
 	}
 	result := make([]Service, 0, len(services))
@@ -326,13 +407,15 @@ func compileServices(config domain.ProfileConfig, vip string) []Service {
 			if listener.ListenAddress != "" && listener.ListenAddress != "0.0.0.0" {
 				address = listener.ListenAddress
 			}
-			service := Service{Protocol: protocol, Address: address, Port: listener.ListenPort, Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs}
+			service := Service{Protocol: protocol, Address: address, Port: listener.ListenPort, Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs, ListenerID: listener.ID, RateLimitEnabled: listener.RateLimitEnabled, RateLimitMbps: listener.RateLimitMbps}
 			for _, backend := range listener.Backends {
 				if backend.Enabled {
 					service.Destinations = append(service.Destinations, Destination{ID: backend.ID, Address: backend.Address, Port: backend.Port, Weight: backend.Weight})
 				}
 			}
-			sort.Slice(service.Destinations, func(i, j int) bool { return destinationKey(service.Destinations[i]) < destinationKey(service.Destinations[j]) })
+			sort.Slice(service.Destinations, func(i, j int) bool {
+				return destinationKey(service.Destinations[i]) < destinationKey(service.Destinations[j])
+			})
 			result = append(result, service)
 		}
 	}
@@ -465,13 +548,13 @@ const (
 func (r *Reconciler) configureKernel(ctx context.Context) error {
 	values := map[string]string{
 		"net.ipv4.ip_forward":                           "1",
-		"net.ipv4.vs.conntrack":                          "1",
-		"net.ipv4.vs.snat_reroute":                       "1",
-		"net.ipv4.vs.expire_nodest_conn":                 "1",
-		"net.ipv4.vs.expire_quiescent_template":          "1",
-		"net.netfilter.nf_conntrack_udp_timeout":         "60",
-		"net.netfilter.nf_conntrack_udp_timeout_stream":  strconv.Itoa(udpConntrackTimeoutSeconds),
-		"net.netfilter.nf_conntrack_max":                 strconv.Itoa(nfConntrackMaxEntries),
+		"net.ipv4.vs.conntrack":                         "1",
+		"net.ipv4.vs.snat_reroute":                      "1",
+		"net.ipv4.vs.expire_nodest_conn":                "1",
+		"net.ipv4.vs.expire_quiescent_template":         "1",
+		"net.netfilter.nf_conntrack_udp_timeout":        "60",
+		"net.netfilter.nf_conntrack_udp_timeout_stream": strconv.Itoa(udpConntrackTimeoutSeconds),
+		"net.netfilter.nf_conntrack_max":                strconv.Itoa(nfConntrackMaxEntries),
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -619,13 +702,21 @@ func (r *Reconciler) saveState(state AppliedState) error {
 	return os.Rename(tmp, r.statePath)
 }
 
-func serviceKey(service Service) string { return fmt.Sprintf("%s/%s:%d", service.Protocol, service.Address, service.Port) }
-func destinationKey(destination Destination) string { return fmt.Sprintf("%s:%d", destination.Address, destination.Port) }
+func serviceKey(service Service) string {
+	return fmt.Sprintf("%s/%s:%d", service.Protocol, service.Address, service.Port)
+}
+func destinationKey(destination Destination) string {
+	return fmt.Sprintf("%s:%d", destination.Address, destination.Port)
+}
 func protocolFlag(protocol domain.Protocol) string {
 	if protocol == domain.ProtocolTCP {
 		return "-t"
 	}
 	return "-u"
 }
-func virtualAddress(service Service) string { return fmt.Sprintf("%s:%d", service.Address, service.Port) }
-func realAddress(destination Destination) string { return fmt.Sprintf("%s:%d", destination.Address, destination.Port) }
+func virtualAddress(service Service) string {
+	return fmt.Sprintf("%s:%d", service.Address, service.Port)
+}
+func realAddress(destination Destination) string {
+	return fmt.Sprintf("%s:%d", destination.Address, destination.Port)
+}

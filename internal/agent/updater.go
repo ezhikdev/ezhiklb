@@ -18,6 +18,14 @@ import (
 
 var releaseVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$`)
 
+// versionFilePath mirrors scripts/install.sh's fixed VERSION_FILE
+// (CONFIG_DIR=/etc/ezhiklb, not configurable via any env var there either).
+// Kept in sync here so a self-update doesn't leave it pointing at whatever
+// version install.sh was last run with — otherwise a later manual install.sh
+// run misreports "Existing EzhikLB <stale version> detected" even though the
+// node has been self-updated several versions past that point.
+const versionFilePath = "/etc/ezhiklb/version"
+
 // Update stage names reported to the panel via heartbeat while an update is
 // in progress, so the UI can show real (coarse-grained) progress instead of
 // a single opaque "updating" state.
@@ -50,7 +58,12 @@ func InstallAgentUpdate(ctx context.Context, version string, onStage func(stage 
 	if _, err = tmp.Write(binary); err == nil { err = tmp.Sync() }
 	if closeErr := tmp.Close(); err == nil { err = closeErr }; if err != nil { return err }
 	if err = os.Chmod(tmpName, 0755); err != nil { return err }
-	return os.Rename(tmpName, current)
+	if err := os.Rename(tmpName, current); err != nil { return err }
+	// Best-effort: the binary swap above is what actually matters and has
+	// already succeeded, so a failure writing this bookkeeping file must
+	// not be reported as a failed update.
+	_ = os.WriteFile(versionFilePath, []byte(version+"\n"), 0644)
+	return nil
 }
 
 func download(ctx context.Context, url string, limit int64) ([]byte, error) {

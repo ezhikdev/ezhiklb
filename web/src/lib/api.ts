@@ -35,6 +35,7 @@ export const api = {
   logout: () => request<void>("/api/v1/auth/logout", { method: "POST" }),
   status: () => request<Status>("/api/v1/status"),
   profiles: () => requestArray<Profile>("/api/v1/profiles"),
+  reorderProfiles: (ids: string[]) => request<void>("/api/v1/profiles/order", { method: "PUT", body: JSON.stringify({ ids }) }),
   profile: (id: string) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}`),
   createProfile: (name: string, description: string, config: ProfileConfig, autoVersion = true, version = "") =>
     request<{ profile: Profile; revision: Revision }>("/api/v1/profiles", { method: "POST", body: JSON.stringify({ name, description, config, auto_version: autoVersion, version }) }),
@@ -45,6 +46,7 @@ export const api = {
   cloneProfile: (id: string, name: string) => request<{ profile: Profile; revision: Revision }>(`/api/v1/profiles/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
   deleteProfile: (id: string) => request<void>(`/api/v1/profiles/${id}`, { method: "DELETE" }),
   nodes: () => requestArray<NodeInfo>("/api/v1/nodes"),
+  reorderNodes: (ids: string[]) => request<void>("/api/v1/nodes/order", { method: "PUT", body: JSON.stringify({ ids }) }),
   createNode: (name: string, ingressAddress: string, profileID: string) => request<{ node: NodeInfo; agent_token: string }>("/api/v1/nodes", { method: "POST", body: JSON.stringify({ name, ingress_address: ingressAddress, profile_id: profileID }) }),
   updateNode: (id: string, name: string, ingressAddress: string) => request<void>(`/api/v1/nodes/${id}`, { method: "PUT", body: JSON.stringify({ name, ingress_address: ingressAddress }) }),
   deleteNode: (id: string) => request<void>(`/api/v1/nodes/${id}`, { method: "DELETE" }),

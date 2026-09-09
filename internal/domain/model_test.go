@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,34 @@ import (
 func TestDefaultProfileIsValid(t *testing.T) {
 	if err := DefaultProfileConfig().Validate(); err != nil {
 		t.Fatalf("default profile is invalid: %v", err)
+	}
+}
+
+func TestLegacyListenerDefaultsToNoRateLimit(t *testing.T) {
+	var listener Listener
+	if err := json.Unmarshal([]byte(`{"id":"old","name":"Old","enabled":true,"listen_port":443,"protocols":["tcp"],"scheduler":"wrr","backends":[{"id":"b","address":"192.0.2.10","port":443,"weight":1,"enabled":true}]}`), &listener); err != nil {
+		t.Fatal(err)
+	}
+	if listener.RateLimitEnabled || listener.RateLimitMbps != 0 {
+		t.Fatalf("legacy listener unexpectedly enabled rate limiting: %#v", listener)
+	}
+}
+
+func TestRateLimitValidation(t *testing.T) {
+	config := DefaultProfileConfig()
+	config.Listeners = []Listener{{
+		ID: "limited", Name: "Limited", Enabled: true, ListenPort: 443, Protocols: []Protocol{ProtocolTCP}, Scheduler: "wrr",
+		RateLimitEnabled: true, Backends: []Backend{{ID: "b", Address: "192.0.2.10", Port: 443, Weight: 1, Enabled: true}},
+	}}
+	if err := config.Validate(); err == nil {
+		t.Fatal("enabled zero rate limit was accepted")
+	}
+	config.Listeners[0].RateLimitMbps = 450
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !config.HasRateLimits() {
+		t.Fatal("enabled rate limit was not detected")
 	}
 }
 

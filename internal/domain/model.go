@@ -45,15 +45,17 @@ type Backend struct {
 }
 
 type Listener struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Enabled       bool       `json:"enabled"`
-	ListenAddress string     `json:"listen_address"`
-	ListenPort    uint16     `json:"listen_port"`
-	Protocols     []Protocol `json:"protocols"`
-	Scheduler     string     `json:"scheduler"`
-	AffinitySecs  int        `json:"affinity_seconds"`
-	Backends      []Backend  `json:"backends"`
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Enabled          bool       `json:"enabled"`
+	ListenAddress    string     `json:"listen_address"`
+	ListenPort       uint16     `json:"listen_port"`
+	Protocols        []Protocol `json:"protocols"`
+	Scheduler        string     `json:"scheduler"`
+	AffinitySecs     int        `json:"affinity_seconds"`
+	RateLimitEnabled bool       `json:"rate_limit_enabled,omitempty"`
+	RateLimitMbps    int        `json:"rate_limit_mbps,omitempty"`
+	Backends         []Backend  `json:"backends"`
 }
 
 type ProfileConfig struct {
@@ -69,6 +71,7 @@ type Profile struct {
 	CurrentRevision int64     `json:"current_revision"`
 	AutoVersion     bool      `json:"auto_version"`
 	Version         string    `json:"version"`
+	SortOrder       int       `json:"sort_order"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -83,35 +86,41 @@ type Revision struct {
 }
 
 type Node struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	IngressAddress  string     `json:"ingress_address"`
-	ObservedAddress string     `json:"observed_address"`
-	ProfileID       string     `json:"profile_id"`
-	DesiredRevision int64      `json:"desired_revision"`
-	AppliedRevision int64      `json:"applied_revision"`
-	AgentVersion    string     `json:"agent_version"`
-	Status          string     `json:"status"`
-	ApplyState      string     `json:"apply_state"`
-	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
-	OnlineSince     *time.Time `json:"online_since,omitempty"`
-	LastError       string     `json:"last_error,omitempty"`
-	Metrics         *NodeMetrics `json:"metrics,omitempty"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	IngressAddress  string           `json:"ingress_address"`
+	ObservedAddress string           `json:"observed_address"`
+	ProfileID       string           `json:"profile_id"`
+	DesiredRevision int64            `json:"desired_revision"`
+	AppliedRevision int64            `json:"applied_revision"`
+	AgentVersion    string           `json:"agent_version"`
+	Status          string           `json:"status"`
+	ApplyState      string           `json:"apply_state"`
+	LastSeenAt      *time.Time       `json:"last_seen_at,omitempty"`
+	OnlineSince     *time.Time       `json:"online_since,omitempty"`
+	LastError       string           `json:"last_error,omitempty"`
+	Metrics         *NodeMetrics     `json:"metrics,omitempty"`
 	Diagnostics     *NodeDiagnostics `json:"diagnostics,omitempty"`
-	UpdateTarget    string     `json:"update_target,omitempty"`
-	UpdateState     string     `json:"update_state,omitempty"`
-	UpdateError     string     `json:"update_error,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	UpdateTarget    string           `json:"update_target,omitempty"`
+	UpdateState     string           `json:"update_state,omitempty"`
+	UpdateError     string           `json:"update_error,omitempty"`
+	SortOrder       int              `json:"sort_order"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 type NodeDiagnostics struct {
-	IPVSAvailable    bool      `json:"ipvs_available"`
-	FirewallReady    bool      `json:"firewall_ready"`
-	ServiceCount     int       `json:"service_count"`
-	DestinationCount int       `json:"destination_count"`
-	Error             string    `json:"error,omitempty"`
-	CheckedAt         time.Time `json:"checked_at"`
+	IPVSAvailable           bool      `json:"ipvs_available"`
+	FirewallReady           bool      `json:"firewall_ready"`
+	ServiceCount            int       `json:"service_count"`
+	DestinationCount        int       `json:"destination_count"`
+	Error                   string    `json:"error,omitempty"`
+	TrafficControlAvailable bool      `json:"traffic_control_available"`
+	RateLimitActive         bool      `json:"rate_limit_active"`
+	RateLimitEntries        int       `json:"rate_limit_entries"`
+	RateLimitDrops          uint64    `json:"rate_limit_drops"`
+	RateLimitError          string    `json:"rate_limit_error,omitempty"`
+	CheckedAt               time.Time `json:"checked_at"`
 }
 
 type NodeMetrics struct {
@@ -166,28 +175,28 @@ type NodeDesiredState struct {
 }
 
 type BackendHealth struct {
-	NodeID           string    `json:"node_id,omitempty"`
-	Address          string    `json:"address"`
-	State            string    `json:"state"`
-	ConsecutiveUp    int       `json:"consecutive_successes"`
-	ConsecutiveDown  int       `json:"consecutive_failures"`
-	LatencyMillis    int64     `json:"latency_millis"`
-	CheckedAt        time.Time `json:"checked_at"`
+	NodeID          string    `json:"node_id,omitempty"`
+	Address         string    `json:"address"`
+	State           string    `json:"state"`
+	ConsecutiveUp   int       `json:"consecutive_successes"`
+	ConsecutiveDown int       `json:"consecutive_failures"`
+	LatencyMillis   int64     `json:"latency_millis"`
+	CheckedAt       time.Time `json:"checked_at"`
 }
 
 type ServiceStat struct {
-	NodeID         string    `json:"node_id,omitempty"`
-	Protocol       Protocol  `json:"protocol"`
-	ListenAddress  string    `json:"listen_address"`
-	ListenPort     uint16    `json:"listen_port"`
-	BackendAddress string    `json:"backend_address,omitempty"`
-	BackendPort    uint16    `json:"backend_port,omitempty"`
-	Connections    uint64    `json:"connections"`
-	IncomingPackets uint64   `json:"incoming_packets"`
-	OutgoingPackets uint64   `json:"outgoing_packets"`
-	IncomingBytes  uint64    `json:"incoming_bytes"`
-	OutgoingBytes  uint64    `json:"outgoing_bytes"`
-	CollectedAt    time.Time `json:"collected_at"`
+	NodeID          string    `json:"node_id,omitempty"`
+	Protocol        Protocol  `json:"protocol"`
+	ListenAddress   string    `json:"listen_address"`
+	ListenPort      uint16    `json:"listen_port"`
+	BackendAddress  string    `json:"backend_address,omitempty"`
+	BackendPort     uint16    `json:"backend_port,omitempty"`
+	Connections     uint64    `json:"connections"`
+	IncomingPackets uint64    `json:"incoming_packets"`
+	OutgoingPackets uint64    `json:"outgoing_packets"`
+	IncomingBytes   uint64    `json:"incoming_bytes"`
+	OutgoingBytes   uint64    `json:"outgoing_bytes"`
+	CollectedAt     time.Time `json:"collected_at"`
 }
 
 func (c ProfileConfig) Validate() error {
@@ -237,6 +246,12 @@ func (c ProfileConfig) Validate() error {
 		}
 		if listener.AffinitySecs < 0 || listener.AffinitySecs > 86400 {
 			problems = append(problems, prefix+".affinity_seconds must be between 0 and 86400")
+		}
+		if listener.RateLimitEnabled && (listener.RateLimitMbps < 1 || listener.RateLimitMbps > 100000) {
+			problems = append(problems, prefix+".rate_limit_mbps must be between 1 and 100000 when enabled")
+		}
+		if !listener.RateLimitEnabled && listener.RateLimitMbps < 0 {
+			problems = append(problems, prefix+".rate_limit_mbps cannot be negative")
 		}
 
 		protocols := map[Protocol]bool{}
@@ -312,6 +327,15 @@ func (c ProfileConfig) Validate() error {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func (c ProfileConfig) HasRateLimits() bool {
+	for _, listener := range c.Listeners {
+		if listener.Enabled && listener.RateLimitEnabled && listener.RateLimitMbps > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func DefaultProfileConfig() ProfileConfig {

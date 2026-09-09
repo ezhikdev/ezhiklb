@@ -5,8 +5,8 @@ to GitHub and let the release workflow create the Linux bundle.
 
 ## Install
 
-1. Create tag `v1.0.9` and download the generated
-   `ezhiklb_1.0.9_linux_amd64.tar.gz` asset on a test node.
+1. Create tag `v1.1.0` and download the generated
+   `ezhiklb_1.1.0_linux_amd64.tar.gz` asset on a test node.
 2. Verify the adjacent SHA-256 file.
 3. Extract the archive and run `sudo ./install.sh`.
 4. Select `Panel + Node`.
@@ -23,6 +23,26 @@ The default web port is `8080`; the dedicated node API is `8081`. Allow the
 agent port in the VPS firewall before enrolling a remote node.
 An upgrade must preserve the ports already stored in `/etc/ezhiklb/ezhiklb.env`
 without asking for them again.
+
+## 1.1.0 rate-limit and ordering checks
+
+1. Upgrade the panel and one new, disconnected test node to `1.1.0`. Confirm
+   that existing profiles show rate limiting as disabled and existing traffic
+   continues without any `EZHIKLB-RATE` chain or EzhikLB `tc` filters.
+2. In one listener enable a `450` Mbit/s limit with both TCP and UDP selected.
+   Confirm that the agent creates two policers total (original and reply), not
+   four per-protocol policers, and that TCP + UDP together cannot exceed the
+   configured value in either direction.
+3. Confirm that upload and download can each approach 450 Mbit/s at the same
+   time, while neither direction exceeds the configured value on that node.
+4. Try publishing the limited profile to a node running an older agent. Both
+   the UI and API must reject it before changing the node's desired revision.
+5. Disable the limit and publish again. Confirm that `EZHIKLB-RATE` is detached
+   and its managed filters are removed without changing the root qdisc.
+6. Drag records beyond the list bounds, then reorder profiles in the grid and
+   nodes in the table. Each item must follow the pointer freely, settle into
+   place smoothly, and keep the order after a page reload. Repeat with keyboard
+   arrow keys on each drag handle.
 
 The installer can bind the panel to loopback or all network interfaces. HTTP is
 supported when the generated node command explicitly enables insecure mode;
@@ -165,3 +185,9 @@ Run these only on disposable test VPS nodes.
 50. Verify `sudo sysctl net.netfilter.nf_conntrack_max` reads `2000000` (up from the distro default, commonly `262144` or `524288`) and that `conntrack -C` stays comfortably under it even after a day of normal traffic.
 51. Re-run the original repro (lock a real client's phone for 5-20 minutes, resume) and confirm the alpha.5 bug is still fixed — this change only shortens IPVS's own connection-table entry, not the conntrack timeout the fix actually depends on, so it should not reintroduce the original disconnect.
 52. Watch `journalctl -u ezhiklb-agent` for a day of real traffic and confirm the `active_ips` metric (now refreshed at most every `activeIPsScanInterval` = 30s instead of every 15s heartbeat) still reports sane, changing values on the Overview charts — not stuck/stale.
+
+## 1.0.10 acceptance checks — self-update wasn't updating `/etc/ezhiklb/version`
+
+53. On a node that has only ever been updated via the panel's one-click button (never re-run `install.sh` manually), trigger a self-update to `1.0.10` and confirm `cat /etc/ezhiklb/version` reads `1.0.10` afterward — not whatever version that node was first installed with. This requires the node's *previous* agent version to already have the corrected `ReadWritePaths=` (including `${CONFIG_DIR}`) from this release's `install.sh`; a node still on the old unit file will fail to write the file silently (best-effort) until `install.sh` is run once more to refresh its systemd unit.
+54. Run the ordinary manual upgrade command (`curl` + `install.sh`, no `EZHIKLB_ROLE`/credentials) against a node that was previously only self-updated, and confirm it now says `Existing EzhikLB 1.0.10 detected` (matching the real running version) instead of a stale version from its original install.
+55. Confirm `systemctl cat ezhiklb-agent.service` shows `ReadWritePaths=... /etc/ezhiklb` and that `ezhiklb.env` (credentials) is unaffected — this only adds write access for the agent's own use, nothing reads/writes secrets differently.

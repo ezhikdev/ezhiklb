@@ -46,8 +46,12 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	if opts.Settings.PanelPort == 0 { opts.Settings.PanelPort = 8080 }
-	if opts.Settings.AgentPort == 0 { opts.Settings.AgentPort = 8081 }
+	if opts.Settings.PanelPort == 0 {
+		opts.Settings.PanelPort = 8080
+	}
+	if opts.Settings.AgentPort == 0 {
+		opts.Settings.AgentPort = 8081
+	}
 	return &Server{store: st, adminToken: opts.AdminToken, agentToken: opts.AgentToken, secure: opts.Secure, webDir: opts.WebDir, logger: opts.Logger, settings: opts.Settings, restart: opts.Restart}, nil
 }
 
@@ -62,6 +66,7 @@ func (s *Server) PanelHandler() http.Handler {
 	mux.Handle("GET /api/v1/status", s.admin(http.HandlerFunc(s.status)))
 	mux.Handle("GET /api/v1/profiles", s.admin(http.HandlerFunc(s.listProfiles)))
 	mux.Handle("POST /api/v1/profiles", s.admin(http.HandlerFunc(s.createProfile)))
+	mux.Handle("PUT /api/v1/profiles/order", s.admin(http.HandlerFunc(s.reorderProfiles)))
 	mux.Handle("GET /api/v1/profiles/{id}", s.admin(http.HandlerFunc(s.getProfile)))
 	mux.Handle("PUT /api/v1/profiles/{id}", s.admin(http.HandlerFunc(s.publishProfile)))
 	mux.Handle("DELETE /api/v1/profiles/{id}", s.admin(http.HandlerFunc(s.deleteProfile)))
@@ -70,6 +75,7 @@ func (s *Server) PanelHandler() http.Handler {
 	mux.Handle("POST /api/v1/profiles/{id}/rollback/{number}", s.admin(http.HandlerFunc(s.rollbackProfile)))
 	mux.Handle("GET /api/v1/nodes", s.admin(http.HandlerFunc(s.listNodes)))
 	mux.Handle("POST /api/v1/nodes", s.admin(http.HandlerFunc(s.createNode)))
+	mux.Handle("PUT /api/v1/nodes/order", s.admin(http.HandlerFunc(s.reorderNodes)))
 	mux.Handle("PUT /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.updateNode)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", s.admin(http.HandlerFunc(s.deleteNode)))
 	mux.Handle("POST /api/v1/nodes/{id}/force-delete", s.admin(http.HandlerFunc(s.forceDeleteNode)))
@@ -89,7 +95,9 @@ func (s *Server) PanelHandler() http.Handler {
 	// enrolled nodes use the dedicated agent listener.
 	mux.Handle("GET /agent/v1/nodes/{id}/desired", s.agent(http.HandlerFunc(s.desiredState)))
 	mux.Handle("POST /agent/v1/nodes/{id}/heartbeat", s.agent(http.HandlerFunc(s.heartbeat)))
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	mux.Handle("/", s.static())
 	return s.securityHeaders(s.recoverPanics(s.logRequests(mux)))
 }
@@ -98,12 +106,16 @@ func (s *Server) AgentHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /agent/v1/nodes/{id}/desired", s.agent(http.HandlerFunc(s.desiredState)))
 	mux.Handle("POST /agent/v1/nodes/{id}/heartbeat", s.agent(http.HandlerFunc(s.heartbeat)))
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	return s.securityHeaders(s.recoverPanics(s.logRequests(mux)))
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Token string `json:"token"` }
+	var body struct {
+		Token string `json:"token"`
+	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -164,6 +176,21 @@ func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, profiles)
 }
 
+func (s *Server) reorderProfiles(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := s.store.ReorderProfiles(r.Context(), body.IDs); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_order", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type profilePayload struct {
 	Name             string               `json:"name"`
 	Description      string               `json:"description"`
@@ -175,7 +202,9 @@ type profilePayload struct {
 
 func (p profilePayload) versioning() (bool, string) {
 	auto := true
-	if p.AutoVersion != nil { auto = *p.AutoVersion }
+	if p.AutoVersion != nil {
+		auto = *p.AutoVersion
+	}
 	return auto, strings.TrimSpace(p.Version)
 }
 
@@ -227,6 +256,10 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
 		return
 	}
+	if errors.Is(err, store.ErrRateLimitUnsupported) {
+		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
 		return
@@ -236,33 +269,65 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listRevisions(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListRevisions(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
-	if err != nil { s.internalError(w, err); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) rollbackProfile(w http.ResponseWriter, r *http.Request) {
 	var number int64
-	if _, err := fmt.Sscan(r.PathValue("number"), &number); err != nil || number < 1 { writeError(w, http.StatusBadRequest, "invalid_request", "Invalid revision number"); return }
+	if _, err := fmt.Sscan(r.PathValue("number"), &number); err != nil || number < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid revision number")
+		return
+	}
 	profile, revision, err := s.store.RollbackProfile(r.Context(), r.PathValue("id"), number)
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile or revision not found"); return }
-	if err != nil { s.internalError(w, err); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Profile or revision not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"profile": profile, "revision": revision})
 }
 
 func (s *Server) cloneProfile(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Name string `json:"name"` }
-	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	profile, revision, err := s.store.CloneProfile(r.Context(), r.PathValue("id"), strings.TrimSpace(body.Name))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
-	if err != nil { writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error()); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"profile": profile, "revision": revision})
 }
 
 func (s *Server) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	err := s.store.DeleteProfile(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
-	if err != nil { writeError(w, http.StatusConflict, "profile_in_use", err.Error()); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, "profile_in_use", err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -275,43 +340,102 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nodes)
 }
 
+func (s *Server) reorderNodes(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := s.store.ReorderNodes(r.Context(), body.IDs); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_order", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListAudit(r.Context(), r.URL.Query().Get("filter"), 200)
-	if err != nil { s.internalError(w, err); return }
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) listMetricHistory(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListMetricHistory(r.Context(), r.URL.Query().Get("node_id"))
-	if err != nil { s.internalError(w, err); return }
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
-	var body struct { Name string `json:"name"`; IngressAddress string `json:"ingress_address"`; ProfileID string `json:"profile_id"` }
-	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
-	body.Name = strings.TrimSpace(body.Name); body.IngressAddress = strings.TrimSpace(body.IngressAddress)
-	if body.Name == "" || body.ProfileID == "" { writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name and profile are required"); return }
+	var body struct {
+		Name           string `json:"name"`
+		IngressAddress string `json:"ingress_address"`
+		ProfileID      string `json:"profile_id"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	body.IngressAddress = strings.TrimSpace(body.IngressAddress)
+	if body.Name == "" || body.ProfileID == "" {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name and profile are required")
+		return
+	}
 	node, token, err := s.store.CreateNode(r.Context(), body.Name, body.IngressAddress, body.ProfileID)
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Profile not found"); return }
-	if err != nil { writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error()); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"node": node, "agent_token": token})
 }
 
 func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
-	var body struct { Name string `json:"name"`; IngressAddress string `json:"ingress_address"` }
-	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
-	if strings.TrimSpace(body.Name) == "" { writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name is required"); return }
+	var body struct {
+		Name           string `json:"name"`
+		IngressAddress string `json:"ingress_address"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name is required")
+		return
+	}
 	err := s.store.UpdateNode(r.Context(), r.PathValue("id"), strings.TrimSpace(body.Name), strings.TrimSpace(body.IngressAddress))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
-	if err != nil { writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error()); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 	err := s.store.DeleteNode(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
-	if err != nil { writeError(w, http.StatusConflict, "cannot_delete", err.Error()); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, "cannot_delete", err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -329,8 +453,13 @@ func (s *Server) forceDeleteNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setNodeEnabled(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Enabled bool `json:"enabled"` }
-	if err := decodeJSON(r, &body); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	if err := s.store.SetNodeEnabled(r.Context(), r.PathValue("id"), body.Enabled); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
@@ -342,22 +471,40 @@ func (s *Server) setNodeEnabled(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) rotateNodeToken(w http.ResponseWriter, r *http.Request) {
 	token, err := s.store.RotateNodeCredential(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Remote node credential not found"); return }
-	if err != nil { s.internalError(w, err); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Remote node credential not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"agent_token": token})
 }
 
 func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 	err := s.store.RevokeNodeCredential(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Remote node credential not found"); return }
-	if err != nil { writeError(w, http.StatusConflict, "cannot_revoke", err.Error()); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Remote node credential not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, "cannot_revoke", err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) requestHealthProbe(w http.ResponseWriter, r *http.Request) {
 	nonce, err := s.store.RequestHealthProbe(r.Context(), r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) { writeError(w, http.StatusNotFound, "not_found", "Node not found"); return }
-	if err != nil { s.internalError(w, err); return }
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]int64{"health_probe": nonce})
 }
 
@@ -366,7 +513,11 @@ func (s *Server) requestNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if errors.Is(err, store.ErrManagedUpdateUnsupported) {
 		writeError(w, http.StatusConflict, "manual_update_required", "Первое обновление агента до beta.3.3 или новее нужно выполнить вручную")
-	} else if err != nil { s.internalError(w, err) } else { writeJSON(w, http.StatusAccepted, map[string]string{"version": Version}) }
+	} else if err != nil {
+		s.internalError(w, err)
+	} else {
+		writeJSON(w, http.StatusAccepted, map[string]string{"version": Version})
+	}
 }
 
 func (s *Server) listHealth(w http.ResponseWriter, r *http.Request) {
@@ -388,13 +539,17 @@ func (s *Server) listStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) assignProfile(w http.ResponseWriter, r *http.Request) {
-	var body struct{ ProfileID string `json:"profile_id"` }
+	var body struct {
+		ProfileID string `json:"profile_id"`
+	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	if err := s.store.AssignProfile(r.Context(), r.PathValue("id"), body.ProfileID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node or profile not found")
+	} else if errors.Is(err, store.ErrRateLimitUnsupported) {
+		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
 	} else if err != nil {
 		s.internalError(w, err)
 	} else {
@@ -404,15 +559,29 @@ func (s *Server) assignProfile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.store.GetSystemSettings(r.Context(), s.settings)
-	if err != nil { s.internalError(w, err); return }
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, settings)
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var next domain.SystemSettings
-	if err := decodeJSON(r, &next); err != nil { writeError(w, http.StatusBadRequest, "invalid_request", err.Error()); return }
-	if next.PanelPort != s.settings.PanelPort { next.LegacyPanelPort = s.settings.PanelPort } else { next.LegacyPanelPort = s.settings.LegacyPanelPort }
-	if next.AgentPort != s.settings.AgentPort { next.LegacyAgentPort = s.settings.AgentPort } else { next.LegacyAgentPort = s.settings.LegacyAgentPort }
+	if err := decodeJSON(r, &next); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if next.PanelPort != s.settings.PanelPort {
+		next.LegacyPanelPort = s.settings.PanelPort
+	} else {
+		next.LegacyPanelPort = s.settings.LegacyPanelPort
+	}
+	if next.AgentPort != s.settings.AgentPort {
+		next.LegacyAgentPort = s.settings.AgentPort
+	} else {
+		next.LegacyAgentPort = s.settings.LegacyAgentPort
+	}
 	if err := s.store.UpdateSystemSettings(r.Context(), next); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
 		return
@@ -433,8 +602,14 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	if state.Config.HasRateLimits() && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(r.Header.Get("X-EzhikLB-Agent-Version"), "1.1.0") < 0 {
+		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до 1.1.0 перед применением ограничения скорости")
+		return
+	}
 	etag := fmt.Sprintf(`"rev-%d-probe-%d-update-%s"`, state.Revision, state.HealthProbe, state.UpdateVersion)
-	if state.Decommission { etag = fmt.Sprintf(`"rev-%d-probe-%d-decommission"`, state.Revision, state.HealthProbe) }
+	if state.Decommission {
+		etag = fmt.Sprintf(`"rev-%d-probe-%d-decommission"`, state.Revision, state.HealthProbe)
+	}
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -445,24 +620,26 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Version         string `json:"version"`
-		AppliedRevision int64  `json:"applied_revision"`
-		ApplyError      string `json:"apply_error"`
-		ApplyState      string `json:"apply_state"`
+		Version         string                 `json:"version"`
+		AppliedRevision int64                  `json:"applied_revision"`
+		ApplyError      string                 `json:"apply_error"`
+		ApplyState      string                 `json:"apply_state"`
 		Health          []domain.BackendHealth `json:"health"`
-		Stats           []domain.ServiceStat `json:"stats"`
-		Metrics         domain.NodeMetrics `json:"metrics"`
+		Stats           []domain.ServiceStat   `json:"stats"`
+		Metrics         domain.NodeMetrics     `json:"metrics"`
 		Diagnostics     domain.NodeDiagnostics `json:"diagnostics"`
-		UpdateState     string `json:"update_state"`
-		UpdateError     string `json:"update_error"`
-		Decommissioned  bool `json:"decommissioned"`
+		UpdateState     string                 `json:"update_state"`
+		UpdateError     string                 `json:"update_error"`
+		Decommissioned  bool                   `json:"decommissioned"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	observedAddress := remoteIPv4(r)
-	if r.PathValue("id") == "local" && (observedAddress == "127.0.0.1" || observedAddress == "::1") { observedAddress = "" }
+	if r.PathValue("id") == "local" && (observedAddress == "127.0.0.1" || observedAddress == "::1") {
+		observedAddress = ""
+	}
 	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Diagnostics, body.UpdateState, body.UpdateError, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
@@ -498,9 +675,13 @@ func (s *Server) agent(next http.Handler) http.Handler {
 
 func remoteIPv4(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil { host = r.RemoteAddr }
+	if err != nil {
+		host = r.RemoteAddr
+	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
-	if ip == nil || ip.To4() == nil { return "" }
+	if ip == nil || ip.To4() == nil {
+		return ""
+	}
 	return ip.String()
 }
 
@@ -592,6 +773,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "1.0.9"
+const Version = "1.1.0"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

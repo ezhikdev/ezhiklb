@@ -22,12 +22,17 @@ var ErrNotFound = errors.New("not found")
 var ErrManagedUpdateUnsupported = errors.New("the node agent must be updated manually to beta.3.3 or newer once")
 var ErrNodeNotPendingDeletion = errors.New("node is not pending deletion")
 var ErrResetUnsupported = errors.New("сначала обновите все назначенные ноды до 1.0.7, чтобы сбросить распределение клиентов")
+var ErrRateLimitUnsupported = errors.New("сначала обновите все назначенные ноды до 1.1.0, чтобы включить ограничение скорости")
 var profileVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$`)
 
 func resolveVersion(auto bool, requested string, number int64) (string, error) {
-	if auto { return fmt.Sprintf("v%d", number), nil }
+	if auto {
+		return fmt.Sprintf("v%d", number), nil
+	}
 	requested = strings.TrimSpace(requested)
-	if !profileVersionPattern.MatchString(requested) { return "", errors.New("profile version may contain only English letters, digits, dots and hyphens") }
+	if !profileVersionPattern.MatchString(requested) {
+		return "", errors.New("profile version may contain only English letters, digits, dots and hyphens")
+	}
 	return requested, nil
 }
 
@@ -174,40 +179,105 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"reset_revision", `INTEGER NOT NULL DEFAULT 0`},
 		{"auto_version", `INTEGER NOT NULL DEFAULT 1`},
 		{"version_label", `TEXT NOT NULL DEFAULT ''`},
+		{"sort_order", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		table := "nodes"
-		if column.name == "auto_version" || column.name == "version_label" { table = "profiles" }
+		if column.name == "auto_version" || column.name == "version_label" {
+			table = "profiles"
+		}
 		if err := s.ensureColumn(ctx, table, column.name, column.definition); err != nil {
 			return err
 		}
 	}
-	if err := s.ensureColumn(ctx, "profile_revisions", "version_label", `TEXT NOT NULL DEFAULT ''`); err != nil { return err }
-	if _, err := s.db.ExecContext(ctx, `UPDATE profiles SET version_label='v' || current_revision WHERE version_label=''`); err != nil { return err }
-	if _, err := s.db.ExecContext(ctx, `UPDATE profile_revisions SET version_label='v' || number WHERE version_label=''`); err != nil { return err }
+	if err := s.ensureColumn(ctx, "profiles", "sort_order", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "profile_revisions", "version_label", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE profiles SET version_label='v' || current_revision WHERE version_label=''`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE profile_revisions SET version_label='v' || number WHERE version_label=''`); err != nil {
+		return err
+	}
+	if err := s.initializeSortOrder(ctx, "profiles"); err != nil {
+		return err
+	}
+	if err := s.initializeSortOrder(ctx, "nodes"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) initializeSortOrder(ctx context.Context, table string) error {
+	var missing int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE sort_order<=0`).Scan(&missing); err != nil || missing == 0 {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM `+table+` ORDER BY CASE WHEN sort_order>0 THEN 0 ELSE 1 END,sort_order,name,id`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for index, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET sort_order=? WHERE id=?`, (index+1)*1000, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, name, definition string) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	found := false
 	for rows.Next() {
 		var cid int
 		var columnName, columnType string
 		var notNull, primaryKey int
 		var defaultValue sql.NullString
-		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil { rows.Close(); return err }
-		if columnName == name { found = true }
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if columnName == name {
+			found = true
+		}
 	}
-	if err := rows.Close(); err != nil { return err }
-	if found { return nil }
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
 	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+name+` `+definition)
 	return err
 }
 
 func newToken() (string, error) {
 	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil { return "", err }
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
 	return hex.EncodeToString(buf), nil
 }
 
@@ -250,8 +320,8 @@ func (s *Store) Bootstrap(ctx context.Context, ingressAddress string, initial do
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO profiles(id,name,description,current_revision,auto_version,version_label,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-		profileID, profileName, "Initial EzhikLB profile", 1, true, "v1", formatTime(now), formatTime(now)); err != nil {
+		`INSERT INTO profiles(id,name,description,current_revision,auto_version,version_label,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		profileID, profileName, "Initial EzhikLB profile", 1, true, "v1", 1000, formatTime(now), formatTime(now)); err != nil {
 		return err
 	}
 	configJSON, _ := json.Marshal(initial)
@@ -262,8 +332,8 @@ func (s *Store) Bootstrap(ctx context.Context, ingressAddress string, initial do
 	}
 	if localNode {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-			"local", "Local node", ingressAddress, profileID, 1, "offline", formatTime(now), formatTime(now)); err != nil {
+			`INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+			"local", "Local node", ingressAddress, profileID, 1, "offline", 1000, formatTime(now), formatTime(now)); err != nil {
 			return err
 		}
 	}
@@ -284,13 +354,13 @@ func (s *Store) reconcileLocalNode(ctx context.Context, ingressAddress string, e
 	}
 	now := formatTime(time.Now().UTC())
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-		"local", "Local node", ingressAddress, profileID, revision, "offline", now, now)
+		`INSERT OR IGNORE INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"local", "Local node", ingressAddress, profileID, revision, "offline", 1000, now, now)
 	return err
 }
 
 func (s *Store) ListProfiles(ctx context.Context) ([]domain.Profile, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,current_revision,auto_version,version_label,created_at,updated_at FROM profiles ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,current_revision,auto_version,version_label,sort_order,created_at,updated_at FROM profiles ORDER BY sort_order,name`)
 	if err != nil {
 		return nil, err
 	}
@@ -306,9 +376,13 @@ func (s *Store) ListProfiles(ctx context.Context) ([]domain.Profile, error) {
 	return result, rows.Err()
 }
 
+func (s *Store) ReorderProfiles(ctx context.Context, ids []string) error {
+	return s.reorder(ctx, "profiles", ids, "profiles.reordered")
+}
+
 func (s *Store) GetProfile(ctx context.Context, id string) (domain.Profile, domain.Revision, error) {
 	profile, err := scanProfile(s.db.QueryRowContext(ctx,
-		`SELECT id,name,description,current_revision,auto_version,version_label,created_at,updated_at FROM profiles WHERE id=?`, id))
+		`SELECT id,name,description,current_revision,auto_version,version_label,sort_order,created_at,updated_at FROM profiles WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Profile{}, domain.Revision{}, ErrNotFound
 	}
@@ -330,15 +404,21 @@ func (s *Store) CreateProfile(ctx context.Context, name, description string, con
 	now := time.Now().UTC()
 	data, _ := json.Marshal(config)
 	version, err := resolveVersion(autoVersion, requestedVersion, 1)
-	if err != nil { return domain.Profile{}, domain.Revision{}, err }
+	if err != nil {
+		return domain.Profile{}, domain.Revision{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Profile{}, domain.Revision{}, err
 	}
 	defer tx.Rollback()
+	var sortOrder int
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sort_order),0)+1000 FROM profiles`).Scan(&sortOrder); err != nil {
+		return domain.Profile{}, domain.Revision{}, err
+	}
 	if _, err = tx.ExecContext(ctx,
-		`INSERT INTO profiles(id,name,description,current_revision,auto_version,version_label,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-		id, name, description, 1, autoVersion, version, formatTime(now), formatTime(now)); err != nil {
+		`INSERT INTO profiles(id,name,description,current_revision,auto_version,version_label,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		id, name, description, 1, autoVersion, version, sortOrder, formatTime(now), formatTime(now)); err != nil {
 		return domain.Profile{}, domain.Revision{}, err
 	}
 	result, err := tx.ExecContext(ctx,
@@ -354,7 +434,7 @@ func (s *Store) CreateProfile(ctx context.Context, name, description string, con
 	if err = tx.Commit(); err != nil {
 		return domain.Profile{}, domain.Revision{}, err
 	}
-	profile := domain.Profile{ID: id, Name: name, Description: description, CurrentRevision: 1, AutoVersion: autoVersion, Version: version, CreatedAt: now, UpdatedAt: now}
+	profile := domain.Profile{ID: id, Name: name, Description: description, CurrentRevision: 1, AutoVersion: autoVersion, Version: version, SortOrder: sortOrder, CreatedAt: now, UpdatedAt: now}
 	revision := domain.Revision{ID: revisionID, ProfileID: id, Number: 1, Version: version, Config: config, CreatedAt: now}
 	return profile, revision, nil
 }
@@ -379,22 +459,67 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 	}
 	next := current + 1
 	version, err := resolveVersion(autoVersion, requestedVersion, next)
-	if err != nil { return domain.Profile{}, domain.Revision{}, err }
-	if version == currentVersion { return domain.Profile{}, domain.Revision{}, errors.New("profile version must change before publishing") }
+	if err != nil {
+		return domain.Profile{}, domain.Revision{}, err
+	}
+	if version == currentVersion {
+		return domain.Profile{}, domain.Revision{}, errors.New("profile version must change before publishing")
+	}
 	if resetConnections {
 		rows, queryErr := tx.QueryContext(ctx, `SELECT agent_version FROM nodes WHERE profile_id=?`, profileID)
-		if queryErr != nil { return domain.Profile{}, domain.Revision{}, queryErr }
+		if queryErr != nil {
+			return domain.Profile{}, domain.Revision{}, queryErr
+		}
 		for rows.Next() {
 			var agentVersion string
-			if scanErr := rows.Scan(&agentVersion); scanErr != nil { rows.Close(); return domain.Profile{}, domain.Revision{}, scanErr }
-			if domain.CompareVersions(agentVersion, "1.0.7") < 0 { rows.Close(); return domain.Profile{}, domain.Revision{}, ErrResetUnsupported }
+			if scanErr := rows.Scan(&agentVersion); scanErr != nil {
+				rows.Close()
+				return domain.Profile{}, domain.Revision{}, scanErr
+			}
+			if domain.CompareVersions(agentVersion, "1.0.7") < 0 {
+				rows.Close()
+				return domain.Profile{}, domain.Revision{}, ErrResetUnsupported
+			}
 		}
-		if rowsErr := rows.Err(); rowsErr != nil { rows.Close(); return domain.Profile{}, domain.Revision{}, rowsErr }
-		if rowsErr := rows.Close(); rowsErr != nil { return domain.Profile{}, domain.Revision{}, rowsErr }
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return domain.Profile{}, domain.Revision{}, rowsErr
+		}
+		if rowsErr := rows.Close(); rowsErr != nil {
+			return domain.Profile{}, domain.Revision{}, rowsErr
+		}
+	}
+	if config.HasRateLimits() {
+		rows, queryErr := tx.QueryContext(ctx, `SELECT agent_version FROM nodes WHERE profile_id=?`, profileID)
+		if queryErr != nil {
+			return domain.Profile{}, domain.Revision{}, queryErr
+		}
+		for rows.Next() {
+			var agentVersion string
+			if scanErr := rows.Scan(&agentVersion); scanErr != nil {
+				rows.Close()
+				return domain.Profile{}, domain.Revision{}, scanErr
+			}
+			if domain.CompareVersions(agentVersion, "1.1.0") < 0 {
+				rows.Close()
+				return domain.Profile{}, domain.Revision{}, ErrRateLimitUnsupported
+			}
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return domain.Profile{}, domain.Revision{}, rowsErr
+		}
+		if rowsErr := rows.Close(); rowsErr != nil {
+			return domain.Profile{}, domain.Revision{}, rowsErr
+		}
 	}
 	var duplicate int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM profile_revisions WHERE profile_id=? AND version_label=?`, profileID, version).Scan(&duplicate); err != nil { return domain.Profile{}, domain.Revision{}, err }
-	if duplicate > 0 { return domain.Profile{}, domain.Revision{}, errors.New("profile version is already used") }
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM profile_revisions WHERE profile_id=? AND version_label=?`, profileID, version).Scan(&duplicate); err != nil {
+		return domain.Profile{}, domain.Revision{}, err
+	}
+	if duplicate > 0 {
+		return domain.Profile{}, domain.Revision{}, errors.New("profile version is already used")
+	}
 	result, err := tx.ExecContext(ctx,
 		`INSERT INTO profile_revisions(profile_id,number,version_label,config_json,created_at) VALUES(?,?,?,?,?)`,
 		profileID, next, version, string(data), formatTime(now))
@@ -425,54 +550,84 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 
 func (s *Store) ListRevisions(ctx context.Context, profileID string) ([]domain.Revision, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,profile_id,number,version_label,config_json,created_at FROM profile_revisions WHERE profile_id=? ORDER BY number DESC`, profileID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	result := make([]domain.Revision, 0)
 	for rows.Next() {
 		var item domain.Revision
 		var configJSON, created string
-		if err := rows.Scan(&item.ID, &item.ProfileID, &item.Number, &item.Version, &configJSON, &created); err != nil { return nil, err }
-		if err := json.Unmarshal([]byte(configJSON), &item.Config); err != nil { return nil, err }
+		if err := rows.Scan(&item.ID, &item.ProfileID, &item.Number, &item.Version, &configJSON, &created); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(configJSON), &item.Config); err != nil {
+			return nil, err
+		}
 		item.CreatedAt, err = parseTime(created)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, item)
 	}
-	if len(result) == 0 { return nil, ErrNotFound }
+	if len(result) == 0 {
+		return nil, ErrNotFound
+	}
 	return result, rows.Err()
 }
 
 func (s *Store) RollbackProfile(ctx context.Context, profileID string, number int64) (domain.Profile, domain.Revision, error) {
 	profile, _, err := s.GetProfile(ctx, profileID)
-	if err != nil { return domain.Profile{}, domain.Revision{}, err }
+	if err != nil {
+		return domain.Profile{}, domain.Revision{}, err
+	}
 	target, err := s.getRevision(ctx, profileID, number)
-	if err != nil { return domain.Profile{}, domain.Revision{}, err }
+	if err != nil {
+		return domain.Profile{}, domain.Revision{}, err
+	}
 	rollbackVersion := ""
-	if !profile.AutoVersion { rollbackVersion = fmt.Sprintf("rollback-%d", profile.CurrentRevision+1) }
+	if !profile.AutoVersion {
+		rollbackVersion = fmt.Sprintf("rollback-%d", profile.CurrentRevision+1)
+	}
 	profile, revision, err := s.PublishRevision(ctx, profileID, profile.Name, profile.Description, target.Config, profile.AutoVersion, rollbackVersion, false)
-	if err == nil { _ = s.Audit(ctx, "profile.rolled_back", "profile", profileID, map[string]any{"from_revision": number, "new_revision": revision.Number}) }
+	if err == nil {
+		_ = s.Audit(ctx, "profile.rolled_back", "profile", profileID, map[string]any{"from_revision": number, "new_revision": revision.Number})
+	}
 	return profile, revision, err
 }
 
 func (s *Store) CloneProfile(ctx context.Context, profileID, name string) (domain.Profile, domain.Revision, error) {
 	profile, revision, err := s.GetProfile(ctx, profileID)
-	if err != nil { return domain.Profile{}, domain.Revision{}, err }
-	if name == "" { name = profile.Name + " — копия" }
+	if err != nil {
+		return domain.Profile{}, domain.Revision{}, err
+	}
+	if name == "" {
+		name = profile.Name + " — копия"
+	}
 	return s.CreateProfile(ctx, name, profile.Description, revision.Config, profile.AutoVersion, revision.Version)
 }
 
 func (s *Store) DeleteProfile(ctx context.Context, profileID string) error {
 	var assigned int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE profile_id=?`, profileID).Scan(&assigned); err != nil { return err }
-	if assigned > 0 { return fmt.Errorf("profile is assigned to %d node(s)", assigned) }
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE profile_id=?`, profileID).Scan(&assigned); err != nil {
+		return err
+	}
+	if assigned > 0 {
+		return fmt.Errorf("profile is assigned to %d node(s)", assigned)
+	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM profiles WHERE id=?`, profileID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := result.RowsAffected()
-	if affected == 0 { return ErrNotFound }
+	if affected == 0 {
+		return ErrNotFound
+	}
 	return s.Audit(ctx, "profile.deleted", "profile", profileID, map[string]any{})
 }
 
 func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
-	rows, err := s.db.QueryContext(ctx, nodeSelect+` ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, nodeSelect+` ORDER BY sort_order,name`)
 	if err != nil {
 		return nil, err
 	}
@@ -494,27 +649,100 @@ func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
 	return nodes, rows.Err()
 }
 
+func (s *Store) ReorderNodes(ctx context.Context, ids []string) error {
+	return s.reorder(ctx, "nodes", ids, "nodes.reordered")
+}
+
+func (s *Store) reorder(ctx context.Context, table string, ids []string, action string) error {
+	if table != "profiles" && table != "nodes" {
+		return errors.New("unsupported reorder target")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM `+table)
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[id] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(ids) != len(existing) {
+		return errors.New("order must contain every item exactly once")
+	}
+	seen := map[string]bool{}
+	for index, id := range ids {
+		if !existing[id] || seen[id] {
+			return errors.New("order contains an unknown or duplicate item")
+		}
+		seen[id] = true
+		if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET sort_order=? WHERE id=?`, (index+1)*1000, id); err != nil {
+			return err
+		}
+	}
+	targetType := strings.TrimSuffix(table, "s")
+	if err := auditTx(ctx, tx, action, targetType, "order", map[string]any{"ids": ids}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) CreateNode(ctx context.Context, name, ingressAddress, profileID string) (domain.Node, string, error) {
 	var revision int64
-	if err := s.db.QueryRowContext(ctx, `SELECT current_revision FROM profiles WHERE id=?`, profileID).Scan(&revision); errors.Is(err, sql.ErrNoRows) { return domain.Node{}, "", ErrNotFound } else if err != nil { return domain.Node{}, "", err }
+	if err := s.db.QueryRowContext(ctx, `SELECT current_revision FROM profiles WHERE id=?`, profileID).Scan(&revision); errors.Is(err, sql.ErrNoRows) {
+		return domain.Node{}, "", ErrNotFound
+	} else if err != nil {
+		return domain.Node{}, "", err
+	}
 	id, err := NewID("nod")
-	if err != nil { return domain.Node{}, "", err }
+	if err != nil {
+		return domain.Node{}, "", err
+	}
 	token, err := newToken()
-	if err != nil { return domain.Node{}, "", err }
+	if err != nil {
+		return domain.Node{}, "", err
+	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil { return domain.Node{}, "", err }
+	if err != nil {
+		return domain.Node{}, "", err
+	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,apply_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, id, name, ingressAddress, profileID, revision, "connecting", "waiting", formatTime(now), formatTime(now)); err != nil { return domain.Node{}, "", err }
-	if _, err = tx.ExecContext(ctx, `INSERT INTO node_credentials(node_id,token_hash,created_at,rotated_at) VALUES(?,?,?,?)`, id, tokenHash(token), formatTime(now), formatTime(now)); err != nil { return domain.Node{}, "", err }
-	if err = auditTx(ctx, tx, "node.created", "node", id, map[string]any{"profile_id": profileID}); err != nil { return domain.Node{}, "", err }
-	if err = tx.Commit(); err != nil { return domain.Node{}, "", err }
-	return domain.Node{ID:id, Name:name, IngressAddress:ingressAddress, ProfileID:profileID, DesiredRevision:revision, Status:"connecting", ApplyState:"waiting", CreatedAt:now, UpdatedAt:now}, token, nil
+	var sortOrder int
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sort_order),0)+1000 FROM nodes`).Scan(&sortOrder); err != nil {
+		return domain.Node{}, "", err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,apply_state,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, name, ingressAddress, profileID, revision, "connecting", "waiting", sortOrder, formatTime(now), formatTime(now)); err != nil {
+		return domain.Node{}, "", err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO node_credentials(node_id,token_hash,created_at,rotated_at) VALUES(?,?,?,?)`, id, tokenHash(token), formatTime(now), formatTime(now)); err != nil {
+		return domain.Node{}, "", err
+	}
+	if err = auditTx(ctx, tx, "node.created", "node", id, map[string]any{"profile_id": profileID}); err != nil {
+		return domain.Node{}, "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Node{}, "", err
+	}
+	return domain.Node{ID: id, Name: name, IngressAddress: ingressAddress, ProfileID: profileID, DesiredRevision: revision, Status: "connecting", ApplyState: "waiting", SortOrder: sortOrder, CreatedAt: now, UpdatedAt: now}, token, nil
 }
 
 func (s *Store) ValidateNodeCredential(ctx context.Context, nodeID, token string) bool {
 	var expected string
-	if err := s.db.QueryRowContext(ctx, `SELECT c.token_hash FROM node_credentials c JOIN nodes n ON n.id=c.node_id WHERE c.node_id=? AND n.status<>'disabled'`, nodeID).Scan(&expected); err != nil { return false }
+	if err := s.db.QueryRowContext(ctx, `SELECT c.token_hash FROM node_credentials c JOIN nodes n ON n.id=c.node_id WHERE c.node_id=? AND n.status<>'disabled'`, nodeID).Scan(&expected); err != nil {
+		return false
+	}
 	return expected == tokenHash(token)
 }
 
@@ -525,26 +753,42 @@ func (s *Store) NodeEnabled(ctx context.Context, nodeID string) bool {
 
 func (s *Store) RotateNodeCredential(ctx context.Context, nodeID string) (string, error) {
 	token, err := newToken()
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	now := formatTime(time.Now().UTC())
 	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=? AND id<>'local'`, nodeID).Scan(&exists); err != nil { return "", err }
-	if exists == 0 { return "", ErrNotFound }
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=? AND id<>'local'`, nodeID).Scan(&exists); err != nil {
+		return "", err
+	}
+	if exists == 0 {
+		return "", ErrNotFound
+	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO node_credentials(node_id,token_hash,created_at,rotated_at) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET token_hash=excluded.token_hash,rotated_at=excluded.rotated_at`, nodeID, tokenHash(token), now, now)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE nodes SET status='offline',last_error='',updated_at=? WHERE id=?`, now, nodeID)
 	_ = s.Audit(ctx, "node.credential_rotated", "node", nodeID, map[string]any{})
 	return token, nil
 }
 
 func (s *Store) RevokeNodeCredential(ctx context.Context, nodeID string) error {
-	if nodeID == "local" { return errors.New("local node credential cannot be revoked") }
+	if nodeID == "local" {
+		return errors.New("local node credential cannot be revoked")
+	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM node_credentials WHERE node_id=?`, nodeID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := result.RowsAffected()
-	if affected == 0 { return ErrNotFound }
+	if affected == 0 {
+		return ErrNotFound
+	}
 	_, err = s.db.ExecContext(ctx, `UPDATE nodes SET status='disabled',updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), nodeID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	return s.Audit(ctx, "node.credential_revoked", "node", nodeID, map[string]any{})
 }
 
@@ -556,26 +800,40 @@ func (s *Store) SetNodeEnabled(ctx context.Context, nodeID string, enabled bool)
 		applyState = "waiting"
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET status=?,apply_state=?,last_error='',online_since=NULL,updated_at=? WHERE id=?`, status, applyState, formatTime(time.Now().UTC()), nodeID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := result.RowsAffected()
-	if affected == 0 { return ErrNotFound }
+	if affected == 0 {
+		return ErrNotFound
+	}
 	return s.Audit(ctx, "node.enabled_changed", "node", nodeID, map[string]any{"enabled": enabled})
 }
 
 func (s *Store) UpdateNode(ctx context.Context, nodeID, name, ingressAddress string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET name=?,ingress_address=?,updated_at=? WHERE id=?`, name, ingressAddress, formatTime(time.Now().UTC()), nodeID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := result.RowsAffected()
-	if affected == 0 { return ErrNotFound }
+	if affected == 0 {
+		return ErrNotFound
+	}
 	return s.Audit(ctx, "node.updated", "node", nodeID, map[string]any{"name": name, "ingress_address": ingressAddress})
 }
 
 func (s *Store) DeleteNode(ctx context.Context, nodeID string) error {
-	if nodeID == "local" { return errors.New("local node cannot be deleted") }
+	if nodeID == "local" {
+		return errors.New("local node cannot be deleted")
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET status='deleting',apply_state='decommissioning',last_error='',updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), nodeID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := result.RowsAffected()
-	if affected == 0 { return ErrNotFound }
+	if affected == 0 {
+		return ErrNotFound
+	}
 	return s.Audit(ctx, "node.decommission_requested", "node", nodeID, map[string]any{})
 }
 
@@ -586,29 +844,55 @@ func (s *Store) DeleteNode(ctx context.Context, nodeID string) error {
 // was actually cleaned up, so it only unblocks nodes already mid-decommission,
 // never a node that hasn't been asked to decommission at all.
 func (s *Store) ForceDeleteNode(ctx context.Context, nodeID string) error {
-	if nodeID == "local" { return errors.New("local node cannot be deleted") }
+	if nodeID == "local" {
+		return errors.New("local node cannot be deleted")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=? AND status='deleting'`, nodeID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
 		var exists int
 		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, nodeID).Scan(&exists)
-		if exists == 0 { return ErrNotFound }
+		if exists == 0 {
+			return ErrNotFound
+		}
 		return ErrNodeNotPendingDeletion
 	}
-	if err := auditTx(ctx, tx, "node.force_deleted", "node", nodeID, map[string]any{}); err != nil { return err }
+	if err := auditTx(ctx, tx, "node.force_deleted", "node", nodeID, map[string]any{}); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) error {
 	var revision int64
-	if err := s.db.QueryRowContext(ctx, `SELECT current_revision FROM profiles WHERE id=?`, profileID).Scan(&revision); errors.Is(err, sql.ErrNoRows) {
+	var configJSON string
+	if err := s.db.QueryRowContext(ctx, `SELECT p.current_revision,r.config_json FROM profiles p JOIN profile_revisions r ON r.profile_id=p.id AND r.number=p.current_revision WHERE p.id=?`, profileID).Scan(&revision, &configJSON); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
+	}
+	var config domain.ProfileConfig
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		return err
+	}
+	if config.HasRateLimits() {
+		var agentVersion string
+		if err := s.db.QueryRowContext(ctx, `SELECT agent_version FROM nodes WHERE id=?`, nodeID).Scan(&agentVersion); errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		if agentVersion != "" && domain.CompareVersions(agentVersion, "1.1.0") < 0 {
+			return ErrRateLimitUnsupported
+		}
 	}
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE nodes SET profile_id=?,desired_revision=?,reset_revision=0,updated_at=? WHERE id=?`, profileID, revision, formatTime(time.Now().UTC()), nodeID)
@@ -646,22 +930,40 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 
 func (s *Store) RequestNodeUpdate(ctx context.Context, nodeID, version string) error {
 	var agentVersion string
-	if err := s.db.QueryRowContext(ctx, `SELECT agent_version FROM nodes WHERE id=? AND status<>'disabled'`, nodeID).Scan(&agentVersion); errors.Is(err, sql.ErrNoRows) { return ErrNotFound } else if err != nil { return err }
-	if !agentSupportsManagedUpdate(agentVersion) { return ErrManagedUpdateUnsupported }
+	if err := s.db.QueryRowContext(ctx, `SELECT agent_version FROM nodes WHERE id=? AND status<>'disabled'`, nodeID).Scan(&agentVersion); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if !agentSupportsManagedUpdate(agentVersion) {
+		return ErrManagedUpdateUnsupported
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET update_target=?,update_state='requested',update_error='',updated_at=? WHERE id=? AND status<>'disabled'`, version, formatTime(time.Now().UTC()), nodeID)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := result.RowsAffected()
-	if affected == 0 { return ErrNotFound }
+	if affected == 0 {
+		return ErrNotFound
+	}
 	return s.Audit(ctx, "node.update_requested", "node", nodeID, map[string]any{"version": version})
 }
 
 func (s *Store) RequestHealthProbe(ctx context.Context, nodeID string) (int64, error) {
 	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, nodeID).Scan(&exists); err != nil { return 0, err }
-	if exists == 0 { return 0, ErrNotFound }
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO node_probe_requests(node_id,nonce) VALUES(?,1) ON CONFLICT(node_id) DO UPDATE SET nonce=nonce+1`, nodeID); err != nil { return 0, err }
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE id=?`, nodeID).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if exists == 0 {
+		return 0, ErrNotFound
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO node_probe_requests(node_id,nonce) VALUES(?,1) ON CONFLICT(node_id) DO UPDATE SET nonce=nonce+1`, nodeID); err != nil {
+		return 0, err
+	}
 	var nonce int64
-	if err := s.db.QueryRowContext(ctx, `SELECT nonce FROM node_probe_requests WHERE node_id=?`, nodeID).Scan(&nonce); err != nil { return 0, err }
+	if err := s.db.QueryRowContext(ctx, `SELECT nonce FROM node_probe_requests WHERE node_id=?`, nodeID).Scan(&nonce); err != nil {
+		return 0, err
+	}
 	_ = s.Audit(ctx, "node.health_probe_requested", "node", nodeID, map[string]any{"nonce": nonce})
 	return nonce, nil
 }
@@ -682,8 +984,12 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 		return err
 	}
 	if decommissioned && previousStatus == "deleting" {
-		if err := auditTx(ctx, tx, "node.decommissioned", "node", nodeID, map[string]any{"agent_version": version}); err != nil { return err }
-		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, nodeID); err != nil { return err }
+		if err := auditTx(ctx, tx, "node.decommissioned", "node", nodeID, map[string]any{"agent_version": version}); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, nodeID); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	if previousStatus == "deleting" {
@@ -697,10 +1003,18 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 		onlineSince = formatTime(now)
 	}
 	if applyState == "" {
-		if applyError != "" { applyState = "error" } else if applied > 0 { applyState = "applied" } else { applyState = "waiting" }
+		if applyError != "" {
+			applyState = "error"
+		} else if applied > 0 {
+			applyState = "applied"
+		} else {
+			applyState = "waiting"
+		}
 	}
 	metricsAt := formatTime(metrics.CollectedAt)
-	if metrics.CollectedAt.IsZero() { metricsAt = formatTime(now) }
+	if metrics.CollectedAt.IsZero() {
+		metricsAt = formatTime(now)
+	}
 	diagnosticsJSON, _ := json.Marshal(diagnostics)
 	var updateTarget, previousUpdateState, previousUpdateError string
 	_ = tx.QueryRowContext(ctx, `SELECT update_target,update_state,update_error FROM nodes WHERE id=?`, nodeID).Scan(&updateTarget, &previousUpdateState, &previousUpdateError)
@@ -711,12 +1025,20 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 		updateState, updateError, updateTarget = "unsupported", "Первое обновление агента до beta.3.3 или новее выполняется вручную", ""
 	} else if updateState == "" {
 		updateState, updateError = previousUpdateState, previousUpdateError
-		if updateState == "" { updateState = "idle" }
+		if updateState == "" {
+			updateState = "idle"
+		}
 	}
-	if updateTarget != "" && domain.CompareVersions(version, updateTarget) >= 0 { updateState = "completed"; updateError = ""; updateTarget = "" }
+	if updateTarget != "" && domain.CompareVersions(version, updateTarget) >= 0 {
+		updateState = "completed"
+		updateError = ""
+		updateTarget = ""
+	}
 	// Keep completion visible until another update is requested. Otherwise a
 	// regular heartbeat can erase it before the UI observes the result.
-	if updateTarget == "" && previousUpdateState == "completed" && updateState == "idle" { updateState = "completed" }
+	if updateTarget == "" && previousUpdateState == "completed" && updateState == "idle" {
+		updateState = "completed"
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,updated_at=? WHERE id=? AND status<>'disabled'`,
 		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, formatTime(now), nodeID)
 	if err != nil {
@@ -726,15 +1048,25 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	if affected == 0 {
 		return ErrNotFound
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET reset_revision=0 WHERE id=? AND reset_revision>0 AND ?>=reset_revision`, nodeID, applied); err != nil { return err }
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET reset_revision=0 WHERE id=? AND reset_revision>0 AND ?>=reset_revision`, nodeID, applied); err != nil {
+		return err
+	}
 	if applyError != "" && applyError != previousError {
-		if err := auditTx(ctx, tx, "node.apply_failed", "node", nodeID, map[string]any{"error": applyError, "revision": applied}); err != nil { return err }
+		if err := auditTx(ctx, tx, "node.apply_failed", "node", nodeID, map[string]any{"error": applyError, "revision": applied}); err != nil {
+			return err
+		}
 	} else if applyError == "" && previousError != "" {
-		if err := auditTx(ctx, tx, "node.apply_recovered", "node", nodeID, map[string]any{"revision": applied}); err != nil { return err }
+		if err := auditTx(ctx, tx, "node.apply_recovered", "node", nodeID, map[string]any{"revision": applied}); err != nil {
+			return err
+		}
 	}
 	metricMinute := now.Truncate(time.Minute)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO node_metric_history(node_id,ram_used_percent,cpu_used_percent,load_1,network_rx_bps,network_tx_bps,active_ips,collected_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(node_id,collected_at) DO UPDATE SET ram_used_percent=excluded.ram_used_percent,cpu_used_percent=excluded.cpu_used_percent,load_1=excluded.load_1,network_rx_bps=excluded.network_rx_bps,network_tx_bps=excluded.network_tx_bps,active_ips=excluded.active_ips`, nodeID, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, formatTime(metricMinute)); err != nil { return err }
-	if _, err := tx.ExecContext(ctx, `DELETE FROM node_metric_history WHERE collected_at<?`, formatTime(now.Add(-24*time.Hour))); err != nil { return err }
+	if _, err := tx.ExecContext(ctx, `INSERT INTO node_metric_history(node_id,ram_used_percent,cpu_used_percent,load_1,network_rx_bps,network_tx_bps,active_ips,collected_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(node_id,collected_at) DO UPDATE SET ram_used_percent=excluded.ram_used_percent,cpu_used_percent=excluded.cpu_used_percent,load_1=excluded.load_1,network_rx_bps=excluded.network_rx_bps,network_tx_bps=excluded.network_tx_bps,active_ips=excluded.active_ips`, nodeID, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, formatTime(metricMinute)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_metric_history WHERE collected_at<?`, formatTime(now.Add(-24*time.Hour))); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM backend_health WHERE node_id=?`, nodeID); err != nil {
 		return err
 	}
@@ -763,16 +1095,34 @@ func agentSupportsManagedUpdate(version string) bool {
 	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
 	parts := strings.SplitN(version, "-", 2)
 	var major, minor, patch int
-	if _, err := fmt.Sscanf(parts[0], "%d.%d.%d", &major, &minor, &patch); err != nil { return false }
-	if major != 0 { return major > 0 }
-	if minor != 1 { return minor > 1 }
-	if patch != 0 { return patch > 0 }
-	if len(parts) == 1 { return true }
+	if _, err := fmt.Sscanf(parts[0], "%d.%d.%d", &major, &minor, &patch); err != nil {
+		return false
+	}
+	if major != 0 {
+		return major > 0
+	}
+	if minor != 1 {
+		return minor > 1
+	}
+	if patch != 0 {
+		return patch > 0
+	}
+	if len(parts) == 1 {
+		return true
+	}
 	segments := strings.Split(parts[1], ".")
-	if len(segments) < 2 || segments[0] != "beta" { return false }
+	if len(segments) < 2 || segments[0] != "beta" {
+		return false
+	}
 	var betaMajor, betaPatch int
-	if _, err := fmt.Sscan(segments[1], &betaMajor); err != nil { return false }
-	if len(segments) > 2 { if _, err := fmt.Sscan(segments[2], &betaPatch); err != nil { return false } }
+	if _, err := fmt.Sscan(segments[1], &betaMajor); err != nil {
+		return false
+	}
+	if len(segments) > 2 {
+		if _, err := fmt.Sscan(segments[2], &betaPatch); err != nil {
+			return false
+		}
+	}
 	return betaMajor > 3 || (betaMajor == 3 && betaPatch >= 3)
 }
 
@@ -822,15 +1172,28 @@ func (s *Store) ListStats(ctx context.Context) ([]domain.ServiceStat, error) {
 
 func (s *Store) ListMetricHistory(ctx context.Context, nodeID string) ([]domain.NodeMetricPoint, error) {
 	query := `SELECT node_id,ram_used_percent,cpu_used_percent,load_1,network_rx_bps,network_tx_bps,active_ips,collected_at FROM node_metric_history WHERE collected_at>=?`
-	args := []any{formatTime(time.Now().UTC().Add(-24*time.Hour))}
-	if nodeID != "" && nodeID != "all" { query += ` AND node_id=?`; args = append(args, nodeID) }
+	args := []any{formatTime(time.Now().UTC().Add(-24 * time.Hour))}
+	if nodeID != "" && nodeID != "all" {
+		query += ` AND node_id=?`
+		args = append(args, nodeID)
+	}
 	query += ` ORDER BY collected_at`
-	rows, err := s.db.QueryContext(ctx, query, args...); if err != nil { return nil, err }; defer rows.Close()
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	result := make([]domain.NodeMetricPoint, 0)
 	for rows.Next() {
-		var item domain.NodeMetricPoint; var collected string
-		if err := rows.Scan(&item.NodeID, &item.RAMUsedPercent, &item.CPUUsedPercent, &item.Load1, &item.NetworkRxBPS, &item.NetworkTxBPS, &item.ActiveIPs, &collected); err != nil { return nil, err }
-		item.CollectedAt, err = parseTime(collected); if err != nil { return nil, err }
+		var item domain.NodeMetricPoint
+		var collected string
+		if err := rows.Scan(&item.NodeID, &item.RAMUsedPercent, &item.CPUUsedPercent, &item.Load1, &item.NetworkRxBPS, &item.NetworkTxBPS, &item.ActiveIPs, &collected); err != nil {
+			return nil, err
+		}
+		item.CollectedAt, err = parseTime(collected)
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -841,7 +1204,7 @@ type scanner interface{ Scan(...any) error }
 func scanProfile(row scanner) (domain.Profile, error) {
 	var p domain.Profile
 	var created, updated string
-	err := row.Scan(&p.ID, &p.Name, &p.Description, &p.CurrentRevision, &p.AutoVersion, &p.Version, &created, &updated)
+	err := row.Scan(&p.ID, &p.Name, &p.Description, &p.CurrentRevision, &p.AutoVersion, &p.Version, &p.SortOrder, &created, &updated)
 	if err != nil {
 		return p, err
 	}
@@ -871,7 +1234,7 @@ func (s *Store) getRevision(ctx context.Context, profileID string, number int64)
 	return r, err
 }
 
-const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,created_at,updated_at FROM nodes`
+const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,sort_order,created_at,updated_at FROM nodes`
 
 func scanNode(row scanner) (domain.Node, error) {
 	var n domain.Node
@@ -879,7 +1242,7 @@ func scanNode(row scanner) (domain.Node, error) {
 	var created, updated string
 	var metrics domain.NodeMetrics
 	var diagnosticsJSON string
-	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &created, &updated)
+	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &n.SortOrder, &created, &updated)
 	if err != nil {
 		return n, err
 	}
@@ -892,17 +1255,23 @@ func scanNode(row scanner) (domain.Node, error) {
 	}
 	if onlineSince.Valid && onlineSince.String != "" {
 		parsed, parseErr := parseTime(onlineSince.String)
-		if parseErr != nil { return n, parseErr }
+		if parseErr != nil {
+			return n, parseErr
+		}
 		n.OnlineSince = &parsed
 	}
 	if metricsAt.Valid && metricsAt.String != "" {
 		parsed, parseErr := parseTime(metricsAt.String)
-		if parseErr != nil { return n, parseErr }
+		if parseErr != nil {
+			return n, parseErr
+		}
 		metrics.CollectedAt = parsed
 		n.Metrics = &metrics
 	}
 	var diagnostics domain.NodeDiagnostics
-	if json.Unmarshal([]byte(diagnosticsJSON), &diagnostics) == nil && !diagnostics.CheckedAt.IsZero() { n.Diagnostics = &diagnostics }
+	if json.Unmarshal([]byte(diagnosticsJSON), &diagnostics) == nil && !diagnostics.CheckedAt.IsZero() {
+		n.Diagnostics = &diagnostics
+	}
 	n.CreatedAt, err = parseTime(created)
 	if err == nil {
 		n.UpdatedAt, err = parseTime(updated)
@@ -913,17 +1282,31 @@ func scanNode(row scanner) (domain.Node, error) {
 func (s *Store) GetSystemSettings(ctx context.Context, defaults domain.SystemSettings) (domain.SystemSettings, error) {
 	result := defaults
 	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM system_settings WHERE key IN ('panel_port','agent_port','legacy_panel_port','legacy_agent_port')`)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	defer rows.Close()
 	for rows.Next() {
 		var key, value string
-		if err := rows.Scan(&key, &value); err != nil { return result, err }
+		if err := rows.Scan(&key, &value); err != nil {
+			return result, err
+		}
 		var parsed int
-		if _, err := fmt.Sscan(value, &parsed); err != nil { continue }
-		if key == "panel_port" { result.PanelPort = parsed }
-		if key == "agent_port" { result.AgentPort = parsed }
-		if key == "legacy_panel_port" { result.LegacyPanelPort = parsed }
-		if key == "legacy_agent_port" { result.LegacyAgentPort = parsed }
+		if _, err := fmt.Sscan(value, &parsed); err != nil {
+			continue
+		}
+		if key == "panel_port" {
+			result.PanelPort = parsed
+		}
+		if key == "agent_port" {
+			result.AgentPort = parsed
+		}
+		if key == "legacy_panel_port" {
+			result.LegacyPanelPort = parsed
+		}
+		if key == "legacy_agent_port" {
+			result.LegacyAgentPort = parsed
+		}
 	}
 	return result, rows.Err()
 }
@@ -932,16 +1315,26 @@ func (s *Store) UpdateSystemSettings(ctx context.Context, settings domain.System
 	if settings.PanelPort < 1024 || settings.PanelPort > 65535 || settings.AgentPort < 1024 || settings.AgentPort > 65535 {
 		return errors.New("ports must be between 1024 and 65535")
 	}
-	if settings.LegacyPanelPort < 0 || settings.LegacyPanelPort > 65535 || settings.LegacyAgentPort < 0 || settings.LegacyAgentPort > 65535 { return errors.New("legacy port is invalid") }
-	if settings.PanelPort == settings.AgentPort { return errors.New("panel and agent ports must be different") }
+	if settings.LegacyPanelPort < 0 || settings.LegacyPanelPort > 65535 || settings.LegacyAgentPort < 0 || settings.LegacyAgentPort > 65535 {
+		return errors.New("legacy port is invalid")
+	}
+	if settings.PanelPort == settings.AgentPort {
+		return errors.New("panel and agent ports must be different")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	now := formatTime(time.Now().UTC())
 	for key, value := range map[string]int{"panel_port": settings.PanelPort, "agent_port": settings.AgentPort, "legacy_panel_port": settings.LegacyPanelPort, "legacy_agent_port": settings.LegacyAgentPort} {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO system_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, fmt.Sprint(value), now); err != nil { return err }
+		if _, err := tx.ExecContext(ctx, `INSERT INTO system_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, fmt.Sprint(value), now); err != nil {
+			return err
+		}
 	}
-	if err := auditTx(ctx, tx, "settings.updated", "system", "network", settings); err != nil { return err }
+	if err := auditTx(ctx, tx, "settings.updated", "system", "network", settings); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -955,22 +1348,38 @@ func (s *Store) Audit(ctx context.Context, action, targetType, targetID string, 
 }
 
 func (s *Store) ListAudit(ctx context.Context, filter string, limit int) ([]domain.AuditEvent, error) {
-	if limit < 1 || limit > 500 { limit = 200 }
+	if limit < 1 || limit > 500 {
+		limit = 200
+	}
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM audit_events WHERE created_at<?`, formatTime(time.Now().UTC().Add(-14*24*time.Hour)))
 	query := `SELECT id,action,target_type,target_id,details_json,created_at FROM audit_events`
 	var args []any
 	switch filter {
-	case "nodes": query += ` WHERE target_type='node' OR action LIKE 'backend.%'`
-	case "profiles": query += ` WHERE target_type='profile'`
-	case "errors": query += ` WHERE action LIKE '%failed%' OR action LIKE '%error%'`
+	case "nodes":
+		query += ` WHERE target_type='node' OR action LIKE 'backend.%'`
+	case "profiles":
+		query += ` WHERE target_type='profile'`
+	case "errors":
+		query += ` WHERE action LIKE '%failed%' OR action LIKE '%error%'`
 	}
-	query += ` ORDER BY id DESC LIMIT ?`; args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...); if err != nil { return nil, err }; defer rows.Close()
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	result := make([]domain.AuditEvent, 0)
 	for rows.Next() {
-		var item domain.AuditEvent; var created string
-		if err := rows.Scan(&item.ID, &item.Action, &item.TargetType, &item.TargetID, &item.Details, &created); err != nil { return nil, err }
-		item.CreatedAt, err = parseTime(created); if err != nil { return nil, err }
+		var item domain.AuditEvent
+		var created string
+		if err := rows.Scan(&item.ID, &item.Action, &item.TargetType, &item.TargetID, &item.Details, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, err = parseTime(created)
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -987,5 +1396,5 @@ func auditTx(ctx context.Context, tx *sql.Tx, action, targetType, targetID strin
 	return err
 }
 
-func formatTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+func formatTime(t time.Time) string             { return t.UTC().Format(time.RFC3339Nano) }
 func parseTime(value string) (time.Time, error) { return time.Parse(time.RFC3339Nano, value) }

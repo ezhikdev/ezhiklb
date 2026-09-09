@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "1.0.9"
+const version = "1.1.0"
 
 type client struct {
 	baseURL string
@@ -55,11 +55,17 @@ func main() {
 	defer desiredPoll.Stop()
 	defer heartbeatPoll.Stop()
 	applied, restoreErr := reconciler.Restore(ctx)
-	if restoreErr != nil { logger.Error("restore last applied state", "error", restoreErr) } else if applied > 0 { logger.Info("restored last applied state", "revision", applied) }
+	if restoreErr != nil {
+		logger.Error("restore last applied state", "error", restoreErr)
+	} else if applied > 0 {
+		logger.Info("restored last applied state", "revision", applied)
+	}
 	var lastHealthProbe int64
 	var applyError string
 	applyState := "connecting"
-	if applied > 0 && restoreErr == nil { applyState = "applied" }
+	if applied > 0 && restoreErr == nil {
+		applyState = "applied"
+	}
 	var healthCancel context.CancelFunc
 	var healthMu sync.Mutex
 	var metrics domain.NodeMetrics
@@ -83,8 +89,15 @@ func main() {
 		if err != nil {
 			logger.Warn("collect IPVS stats", "error", err)
 		}
-		if collected, collectErr := metricsCollector.Collect(); collectErr != nil { logger.Warn("collect system metrics", "error", collectErr) } else { metrics = collected }
-		if time.Since(diagnosticsAt) >= time.Minute { diagnostics = agent.CollectDiagnostics(ctx, runner, reconciler.Services()); diagnosticsAt = time.Now() }
+		if collected, collectErr := metricsCollector.Collect(); collectErr != nil {
+			logger.Warn("collect system metrics", "error", collectErr)
+		} else {
+			metrics = collected
+		}
+		if time.Since(diagnosticsAt) >= time.Minute {
+			diagnostics = agent.CollectDiagnostics(ctx, runner, reconciler.Services(), reconciler.TrafficControls())
+			diagnosticsAt = time.Now()
+		}
 		if err := api.heartbeat(ctx, nodeID, applied, applyError, applyState, monitor.Results(), stats, metrics, diagnostics, updateState, updateError, decommissioned); err != nil {
 			logger.Error("send heartbeat", "error", err)
 			return false
@@ -94,7 +107,9 @@ func main() {
 	reconcile := func() bool {
 		knownRevision := applied
 		refreshingRestored := restoreNeedsProfile
-		if refreshingRestored { knownRevision = 0 }
+		if refreshingRestored {
+			knownRevision = 0
+		}
 		desired, changed, err := api.desired(ctx, nodeID, knownRevision, lastHealthProbe, lastUpdateTarget)
 		if err != nil {
 			logger.Error("fetch desired state", "error", err)
@@ -118,20 +133,32 @@ func main() {
 				updateCtx, cancelUpdate := context.WithTimeout(ctx, 3*time.Minute)
 				err := agent.InstallAgentUpdate(updateCtx, desired.UpdateVersion, func(stage string) { updateState = stage; report() })
 				cancelUpdate()
-				if err != nil { updateState, updateError = "error", err.Error(); logger.Error("update agent", "version", desired.UpdateVersion, "error", err); return true }
+				if err != nil {
+					updateState, updateError = "error", err.Error()
+					logger.Error("update agent", "version", desired.UpdateVersion, "error", err)
+					return true
+				}
 				updateState = "restarting"
 				report()
 				logger.Info("agent update installed", "version", desired.UpdateVersion)
 				// --no-block is required when a service asks systemd to restart itself:
 				// waiting for the job would wait for this very process to terminate.
 				_, err = runner.Run(context.Background(), "systemctl", []string{"--no-block", "restart", "ezhiklb-agent.service"}, "")
-				if err != nil { updateState, updateError = "error", err.Error(); return true }
+				if err != nil {
+					updateState, updateError = "error", err.Error()
+					return true
+				}
 				return false
 			}
 		}
 		if desired.Decommission {
 			applyState = "decommissioning"
-			if err := reconciler.Decommission(ctx); err != nil { applyError = err.Error(); applyState = "error"; logger.Error("decommission node", "error", err); return true }
+			if err := reconciler.Decommission(ctx); err != nil {
+				applyError = err.Error()
+				applyState = "error"
+				logger.Error("decommission node", "error", err)
+				return true
+			}
 			applyError = ""
 			decommissioned = true
 			logger.Info("node decommission completed")
@@ -172,7 +199,9 @@ func main() {
 				return true
 			}
 			healthMu.Lock()
-			if healthCancel != nil { healthCancel() }
+			if healthCancel != nil {
+				healthCancel()
+			}
 			healthCtx, stopHealth := context.WithCancel(ctx)
 			healthCancel = stopHealth
 			healthMu.Unlock()
@@ -226,6 +255,7 @@ func (c *client) desired(ctx context.Context, nodeID string, knownRevision, know
 		return result, false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("X-EzhikLB-Agent-Version", version)
 	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d-probe-%d-update-%s"`, knownRevision, knownHealthProbe, knownUpdate))
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -274,7 +304,9 @@ func env(key, fallback string) string {
 
 func isLoopbackURL(value string) bool {
 	parsed, err := url.Parse(value)
-	if err != nil { return false }
+	if err != nil {
+		return false
+	}
 	host := parsed.Hostname()
 	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }

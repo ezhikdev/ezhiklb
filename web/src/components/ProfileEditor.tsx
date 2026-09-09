@@ -1,7 +1,8 @@
 import { ArrowRight, Copy, GripVertical, Pencil, Plus, Server, Trash2 } from "lucide-react"
-import { useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useMemo, useState } from "react"
 import type { Backend, BackendHealth, Listener, ProfileConfig, Protocol } from "../types"
 import { Badge, Button, Card, ConfirmDialog, Dialog, Field, Input, SelectMenu, Switch } from "./ui"
+import { useDragReorder } from "./useDragReorder"
 
 const makeID = (prefix: string) => {
   const bytes = new Uint8Array(8)
@@ -13,7 +14,7 @@ const makeID = (prefix: string) => {
 const newBackend = (): Backend => ({ id: makeID("bck"), address: "", port: 8080, weight: 1, enabled: true })
 const newListener = (): Listener => ({
   id: makeID("lst"), name: "Новая запись", enabled: true, listen_address: "0.0.0.0", listen_port: 8000,
-  protocols: ["udp"], scheduler: "wrr", affinity_seconds: 0, backends: [newBackend()],
+  protocols: ["udp"], scheduler: "wrr", affinity_seconds: 0, rate_limit_enabled: false, rate_limit_mbps: 0, backends: [newBackend()],
 })
 
 type ListenerErrors = Record<string, string>
@@ -40,6 +41,7 @@ function validateListener(listener: Listener, others: Listener[]): ListenerError
   if (!Number.isInteger(listener.listen_port) || listener.listen_port < 1 || listener.listen_port > 65535) errors.listen_port = "Порт должен быть от 1 до 65535"
   if (listener.protocols.length === 0) errors.protocols = "Выберите TCP, UDP или оба протокола"
   if (listener.affinity_seconds < 0 || listener.affinity_seconds > 86400) errors.affinity_seconds = "Допустимо значение от 0 до 86400"
+  if (listener.rate_limit_enabled && (!Number.isInteger(listener.rate_limit_mbps) || (listener.rate_limit_mbps ?? 0) < 1 || (listener.rate_limit_mbps ?? 0) > 100000)) errors.rate_limit_mbps = "Лимит должен быть от 1 до 100000 Мбит/с"
   if (listener.backends.length === 0) errors.backends = "Добавьте хотя бы один выход"
   listener.backends.forEach((backend, index) => {
     if (!isIPv4(backend.address)) errors[`backend.${index}.address`] = "Некорректный IPv4"
@@ -111,133 +113,32 @@ export function ProfileEditor({ initial, health, nodeAddresses, onChange }: { in
   </div>
 }
 
-// Custom drag reordering (no library): each row's DOM node is tracked by id so a
-// pointer-driven drag can move it with a direct 1:1 transform while the other rows
-// FLIP-animate into their new slots. Reordering only changes array order — it never
-// touches listener data, so it is purely a display/organization affordance.
 function RuleList({ listeners, onToggle, onEdit, onClone, onRemove, onReorder }: { listeners: Listener[]; onToggle: (index: number, enabled: boolean) => void; onEdit: (index: number) => void; onClone: (index: number) => void; onRemove: (index: number) => void; onReorder: (next: Listener[]) => void }) {
-  const rowRefs = useRef(new Map<string, HTMLDivElement>())
-  const rectsRef = useRef(new Map<string, DOMRect>())
-  const dragRef = useRef<{ id: string; pointerId: number; grabOffsetY: number } | null>(null)
-  const lastPointerY = useRef(0)
-  const [draggingId, setDraggingId] = useState<string | null>(null)
-
-  const applyDragTransform = (id: string) => {
-    const el = rowRefs.current.get(id)
-    const rect = rectsRef.current.get(id)
-    if (!el || !rect) return
-    const info = dragRef.current
-    const desiredTop = lastPointerY.current - (info?.grabOffsetY ?? 0)
-    el.style.transform = `translateY(${(desiredTop - rect.top).toFixed(1)}px) scale(1.015)`
-  }
-
-  useLayoutEffect(() => {
-    for (const listener of listeners) {
-      const el = rowRefs.current.get(listener.id)
-      if (!el) continue
-      const previous = rectsRef.current.get(listener.id)
-      // Clear any in-flight transform *before* measuring. getBoundingClientRect()
-      // reports the current painted (transformed) position, not the row's true
-      // position in flow — the dragged row always has a transform applied, and a
-      // neighbor can still be mid-FLIP-transition from the previous reorder step.
-      // Measuring without clearing first corrupts the reference rect, which then
-      // compounds on every subsequent pointer move (the dragged row visibly
-      // "jumping" whenever another row shifts past it).
-      el.style.transition = "none"
-      el.style.transform = ""
-      const next = el.getBoundingClientRect()
-      rectsRef.current.set(listener.id, next)
-      if (listener.id === draggingId) { applyDragTransform(listener.id); continue }
-      if (!previous) continue
-      const dy = previous.top - next.top
-      if (Math.abs(dy) < 0.5) continue
-      el.style.transform = `translateY(${dy}px)`
-      el.getBoundingClientRect()
-      requestAnimationFrame(() => { el.style.transition = "transform .28s cubic-bezier(.22,.8,.32,1)"; el.style.transform = "" })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [listeners, draggingId])
-
-  const startDrag = (event: React.PointerEvent<HTMLButtonElement>, id: string) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return
-    const el = rowRefs.current.get(id)
-    if (!el) return
-    // Clear first in case this row is grabbed again mid-settle from a previous
-    // drop — otherwise the grab offset is computed against a still-animating
-    // (transformed) rect instead of the row's true resting position.
-    el.style.transition = "none"
-    el.style.transform = ""
-    const rect = el.getBoundingClientRect()
-    rectsRef.current.set(id, rect)
-    dragRef.current = { id, pointerId: event.pointerId, grabOffsetY: event.clientY - rect.top }
-    lastPointerY.current = event.clientY
-    setDraggingId(id)
-    el.style.zIndex = "5"
-    event.currentTarget.setPointerCapture(event.pointerId)
-    event.preventDefault()
-  }
-
-  const onHandleMove = (event: React.PointerEvent<HTMLButtonElement>) => {
-    const info = dragRef.current
-    if (!info || info.pointerId !== event.pointerId) return
-    lastPointerY.current = event.clientY
-    applyDragTransform(info.id)
-    const rect = rectsRef.current.get(info.id)
-    if (!rect) return
-    const draggedCenter = lastPointerY.current - info.grabOffsetY + rect.height / 2
-    let targetIndex = 0
-    for (const listener of listeners) {
-      if (listener.id === info.id) continue
-      const other = rectsRef.current.get(listener.id)
-      if (other && draggedCenter > other.top + other.height / 2) targetIndex++
-    }
-    const fromIndex = listeners.findIndex((item) => item.id === info.id)
-    if (targetIndex !== fromIndex && fromIndex !== -1) {
-      const next = [...listeners]
-      const [moved] = next.splice(fromIndex, 1)
-      next.splice(targetIndex, 0, moved)
-      onReorder(next)
-    }
-  }
-
-  const endDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
-    const info = dragRef.current
-    if (!info || info.pointerId !== event.pointerId) return
-    const el = rowRefs.current.get(info.id)
-    if (el) {
-      el.style.transition = "transform .22s cubic-bezier(.22,.8,.32,1)"
-      el.style.transform = ""
-      el.style.zIndex = ""
-    }
-    dragRef.current = null
-    setDraggingId(null)
-  }
+  const { activeID, itemRef, handleProps } = useDragReorder({ items: listeners, getID: (listener) => listener.id, axis: "vertical", onReorder })
 
   return <div className="rule-list">{listeners.map((listener, index) => (
     <div key={listener.id} data-row-id={listener.id}
-      ref={(el) => { if (el) rowRefs.current.set(listener.id, el); else rowRefs.current.delete(listener.id) }}
-      className={`rule-row-wrap ${draggingId === listener.id ? "rule-row-wrap--dragging" : ""}`}>
+      ref={itemRef(listener.id)}
+      className={`rule-row-wrap ${activeID === listener.id ? "sortable-placeholder" : ""}`}>
       <RuleRow listener={listener}
         onToggle={(enabled) => onToggle(index, enabled)}
         onEdit={() => onEdit(index)}
         onClone={() => onClone(index)}
         onRemove={() => onRemove(index)}
-        onGrabStart={(event) => startDrag(event, listener.id)}
-        onGrabMove={onHandleMove}
-        onGrabEnd={endDrag} />
+        dragHandleProps={handleProps(listener.id)} />
     </div>
   ))}</div>
 }
 
-function RuleRow({ listener, onToggle, onEdit, onClone, onRemove, onGrabStart, onGrabMove, onGrabEnd }: { listener: Listener; onToggle: (enabled: boolean) => void; onEdit: () => void; onClone: () => void; onRemove: () => void; onGrabStart: (event: React.PointerEvent<HTMLButtonElement>) => void; onGrabMove: (event: React.PointerEvent<HTMLButtonElement>) => void; onGrabEnd: (event: React.PointerEvent<HTMLButtonElement>) => void }) {
+function RuleRow({ listener, onToggle, onEdit, onClone, onRemove, dragHandleProps }: { listener: Listener; onToggle: (enabled: boolean) => void; onEdit: () => void; onClone: () => void; onRemove: () => void; dragHandleProps: React.HTMLAttributes<HTMLButtonElement> }) {
   const enabledBackends = listener.backends.filter((backend) => backend.enabled)
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
   return <Card className={`rule-row ${listener.enabled ? "" : "rule-row--disabled"}`}>
     <button type="button" className="rule-row__handle" aria-label={`Изменить порядок: ${listener.name}`} title="Перетащите, чтобы изменить порядок в списке"
-      onPointerDown={onGrabStart} onPointerMove={onGrabMove} onPointerUp={onGrabEnd} onPointerCancel={onGrabEnd}><GripVertical /></button>
+      {...dragHandleProps}><GripVertical /></button>
     <div className="rule-row__toggle"><Switch label={`${listener.enabled ? "Выключить" : "Включить"} ${listener.name}`} checked={listener.enabled} onChange={onToggle} /></div>
     <button type="button" className="rule-row__main" onClick={onEdit}>
-      <div className="rule-row__name"><strong>{listener.name}</strong><span>{listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}</span></div>
+      <div className="rule-row__name"><strong>{listener.name}</strong><span>{listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}{listener.rate_limit_enabled ? ` · ≤ ${listener.rate_limit_mbps} Мбит/с` : ""}</span></div>
       <div className="rule-route mono"><span>{listener.listen_address}:{listener.listen_port}</span><ArrowRight /><span>{enabledBackends.length} {enabledBackends.length === 1 ? "выход" : "выхода"}</span></div>
       <div className="rule-targets">{enabledBackends.slice(0, 2).map((backend) => <span key={backend.id}>{backend.address}:{backend.port} · {totalWeight ? Math.round(backend.weight / totalWeight * 100) : 0}%</span>)}{enabledBackends.length > 2 && <span>+ ещё {enabledBackends.length - 2}</span>}</div>
     </button>
@@ -282,6 +183,12 @@ function ListenerDialog({ initial, others, health, nodeAddresses, onSave, onClos
       <div className="affinity-row">
         <Field label="Affinity" hint="Закрепляет IP клиента за одним backend; для VPN обычно подходят 1–5 часов" error={errors.affinity_seconds}><SelectMenu label="Время Affinity" value={affinityPresets.some((preset) => preset.value === listener.affinity_seconds) ? String(listener.affinity_seconds) : "custom"} onChange={(value) => patch({ affinity_seconds: value === "custom" ? 300 : Number(value) })} options={[...affinityPresets.map((preset) => ({ value: String(preset.value), label: preset.label, description: preset.description })), { value: "custom", label: "Своё значение", description: "Указать время вручную в секундах" }]} /></Field>
         {affinityPresets.every((preset) => preset.value !== listener.affinity_seconds) && <Field label="Секунд" hint="1–86400"><Input type="number" min={1} max={86400} value={listener.affinity_seconds} aria-invalid={Boolean(errors.affinity_seconds)} onChange={(e) => patch({ affinity_seconds: Number(e.target.value) })} /></Field>}
+      </div>
+
+      <div className={`rate-limit-option ${listener.rate_limit_enabled ? "rate-limit-option--active" : ""}`}>
+        <Switch label="Ограничить скорость записи" checked={Boolean(listener.rate_limit_enabled)} onChange={(enabled) => patch({ rate_limit_enabled: enabled, rate_limit_mbps: enabled ? listener.rate_limit_mbps || 100 : 0 })} />
+        <div className="rate-limit-option__copy"><strong>Максимальная пропускная способность</strong><span>Общий предел для TCP и UDP. На каждой ноде отдельно, одинаковое значение независимо для входящего и исходящего направления.</span></div>
+        {listener.rate_limit_enabled && <Field label="Мбит/с" hint="1–100000" error={errors.rate_limit_mbps}><Input type="number" min={1} max={100000} step={1} value={listener.rate_limit_mbps ?? 100} aria-invalid={Boolean(errors.rate_limit_mbps)} onChange={(event) => patch({ rate_limit_mbps: Number(event.target.value) })} /></Field>}
       </div>
 
       <div className="backend-heading"><div><p className="eyebrow">Выходы</p><h3>{listener.backends.length} backend</h3></div><Button variant="secondary" onClick={() => patch({ backends: [...listener.backends, newBackend()] })}><Plus data-icon="inline-start" />Добавить выход</Button></div>

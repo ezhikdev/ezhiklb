@@ -28,11 +28,17 @@ func TestResolveVersion(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := resolveVersion(test.automatic, test.requested, test.number)
 			if test.wantError {
-				if err == nil { t.Fatal("expected validation error") }
+				if err == nil {
+					t.Fatal("expected validation error")
+				}
 				return
 			}
-			if err != nil { t.Fatal(err) }
-			if got != test.want { t.Fatalf("version = %q, want %q", got, test.want) }
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("version = %q, want %q", got, test.want)
+			}
 		})
 	}
 }
@@ -40,90 +46,273 @@ func TestResolveVersion(t *testing.T) {
 func TestBootstrapReconcilesLocalNodeWithInstallRole(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", false); err != nil { t.Fatal(err) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", false); err != nil {
+		t.Fatal(err)
+	}
 	nodes, err := s.ListNodes(ctx)
-	if err != nil { t.Fatal(err) }
-	if len(nodes) != 0 { t.Fatalf("panel-only bootstrap created nodes: %#v", nodes) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("panel-only bootstrap created nodes: %#v", nodes)
+	}
 
 	profiles, err := s.ListProfiles(ctx)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	remote, _, err := s.CreateNode(ctx, "server-1", "203.0.113.20", profiles[0].ID)
-	if err != nil { t.Fatal(err) }
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil {
+		t.Fatal(err)
+	}
 	nodes, err = s.ListNodes(ctx)
-	if err != nil { t.Fatal(err) }
-	if len(nodes) != 2 { t.Fatalf("panel-node bootstrap did not add local node: %#v", nodes) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("panel-node bootstrap did not add local node: %#v", nodes)
+	}
 
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", false); err != nil { t.Fatal(err) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", false); err != nil {
+		t.Fatal(err)
+	}
 	nodes, err = s.ListNodes(ctx)
-	if err != nil { t.Fatal(err) }
-	if len(nodes) != 1 || nodes[0].ID != remote.ID { t.Fatalf("panel-only reconciliation removed the wrong node: %#v", nodes) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != remote.ID {
+		t.Fatalf("panel-only reconciliation removed the wrong node: %#v", nodes)
+	}
 }
 
 func TestProfileVersionsAndAuditRetention(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil {
+		t.Fatal(err)
+	}
 	profiles, err := s.ListProfiles(ctx)
-	if err != nil { t.Fatal(err) }
-	if len(profiles) != 1 || profiles[0].Version != "v1" || !profiles[0].AutoVersion { t.Fatalf("unexpected bootstrap profile: %#v", profiles) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || profiles[0].Version != "v1" || !profiles[0].AutoVersion {
+		t.Fatalf("unexpected bootstrap profile: %#v", profiles)
+	}
 	profile, revision, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, domain.DefaultProfileConfig(), true, "", false)
-	if err != nil { t.Fatal(err) }
-	if profile.Version != "v2" || revision.Version != "v2" { t.Fatalf("automatic version = %q/%q, want v2", profile.Version, revision.Version) }
-	if _, _, err := s.PublishRevision(ctx, profile.ID, profile.Name, profile.Description, domain.DefaultProfileConfig(), false, "v2", false); err == nil { t.Fatal("expected unchanged manual version to fail") }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Version != "v2" || revision.Version != "v2" {
+		t.Fatalf("automatic version = %q/%q, want v2", profile.Version, revision.Version)
+	}
+	if _, _, err := s.PublishRevision(ctx, profile.ID, profile.Name, profile.Description, domain.DefaultProfileConfig(), false, "v2", false); err == nil {
+		t.Fatal("expected unchanged manual version to fail")
+	}
 	profile, _, err = s.PublishRevision(ctx, profile.ID, profile.Name, profile.Description, domain.DefaultProfileConfig(), false, "vpn-2026.08", false)
-	if err != nil { t.Fatal(err) }
-	if profile.Version != "vpn-2026.08" || profile.AutoVersion { t.Fatalf("unexpected manual profile: %#v", profile) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Version != "vpn-2026.08" || profile.AutoVersion {
+		t.Fatalf("unexpected manual profile: %#v", profile)
+	}
 
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO audit_events(action,target_type,target_id,details_json,created_at) VALUES(?,?,?,?,?)`, "node.apply_failed", "node", "old", `{}`, formatTime(time.Now().UTC().Add(-15*24*time.Hour))); err != nil { t.Fatal(err) }
-	if err := s.Audit(ctx, "node.apply_failed", "node", "current", map[string]any{"error": "test"}); err != nil { t.Fatal(err) }
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO audit_events(action,target_type,target_id,details_json,created_at) VALUES(?,?,?,?,?)`, "node.apply_failed", "node", "old", `{}`, formatTime(time.Now().UTC().Add(-15*24*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Audit(ctx, "node.apply_failed", "node", "current", map[string]any{"error": "test"}); err != nil {
+		t.Fatal(err)
+	}
 	events, err := s.ListAudit(ctx, "errors", 200)
-	if err != nil { t.Fatal(err) }
-	if len(events) != 1 || events[0].TargetID != "current" { t.Fatalf("unexpected retained errors: %#v", events) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].TargetID != "current" {
+		t.Fatalf("unexpected retained errors: %#v", events)
+	}
 }
 
 func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
-	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3.3' WHERE id='local'`); err != nil { t.Fatal(err) }
-	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil { t.Fatal(err) }
-	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", false); err != nil { t.Fatal(err) }
-	nodes, err := s.ListNodes(ctx); if err != nil { t.Fatal(err) }
-	if nodes[0].UpdateState != "unsupported" || nodes[0].UpdateTarget != "" { t.Fatalf("legacy update was not completed as unsupported: %#v", nodes[0]) }
-	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3.3' WHERE id='local'`); err != nil { t.Fatal(err) }
-	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil { t.Fatal(err) }
-	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil { t.Fatal(err) }
-	nodes, err = s.ListNodes(ctx); if err != nil { t.Fatal(err) }
-	if nodes[0].UpdateState != "completed" || nodes[0].UpdateTarget != "" { t.Fatalf("completion was not recorded: %#v", nodes[0]) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3.3' WHERE id='local'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := s.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[0].UpdateState != "unsupported" || nodes[0].UpdateTarget != "" {
+		t.Fatalf("legacy update was not completed as unsupported: %#v", nodes[0])
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='0.1.0-beta.3.3' WHERE id='local'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err = s.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[0].UpdateState != "completed" || nodes[0].UpdateTarget != "" {
+		t.Fatalf("completion was not recorded: %#v", nodes[0])
+	}
 }
 
 func TestPublishedResetIsOneShotAndRequiresCompatibleAgents(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
-	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil { t.Fatal(err) }
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil {
+		t.Fatal(err)
+	}
 	profiles, err := s.ListProfiles(ctx)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, domain.DefaultProfileConfig(), true, "", true); !errors.Is(err, ErrResetUnsupported) {
 		t.Fatalf("old agent reset error = %v, want %v", err, ErrResetUnsupported)
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='1.0.7' WHERE id='local'`); err != nil { t.Fatal(err) }
+	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='1.0.7' WHERE id='local'`); err != nil {
+		t.Fatal(err)
+	}
 	_, revision, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, domain.DefaultProfileConfig(), true, "", true)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	desired, err := s.DesiredState(ctx, "local")
-	if err != nil { t.Fatal(err) }
-	if !desired.ResetConnections { t.Fatal("published reset was not delivered to assigned node") }
-	if err := s.Heartbeat(ctx, "local", "1.0.7", "", "applied", revision.Number, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !desired.ResetConnections {
+		t.Fatal("published reset was not delivered to assigned node")
+	}
+	if err := s.Heartbeat(ctx, "local", "1.0.7", "", "applied", revision.Number, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil {
+		t.Fatal(err)
+	}
 	desired, err = s.DesiredState(ctx, "local")
-	if err != nil { t.Fatal(err) }
-	if desired.ResetConnections { t.Fatal("acknowledged reset was delivered more than once") }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if desired.ResetConnections {
+		t.Fatal("acknowledged reset was delivered more than once")
+	}
+}
+
+func TestProfileAndNodeOrderPersists(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", false); err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := s.CreateProfile(ctx, "Alpha", "", domain.DefaultProfileConfig(), true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := s.CreateProfile(ctx, "Beta", "", domain.DefaultProfileConfig(), true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := s.ListProfiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultID := profiles[0].ID
+	if err := s.ReorderProfiles(ctx, []string{second.ID, first.ID, defaultID}); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err = s.ListProfiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profiles[0].ID != second.ID || profiles[1].ID != first.ID || profiles[2].ID != defaultID {
+		t.Fatalf("profile order was not saved: %#v", profiles)
+	}
+
+	nodeA, _, err := s.CreateNode(ctx, "Node A", "203.0.113.10", first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeB, _, err := s.CreateNode(ctx, "Node B", "203.0.113.11", first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReorderNodes(ctx, []string{nodeB.ID, nodeA.ID}); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := s.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[0].ID != nodeB.ID || nodes[1].ID != nodeA.ID {
+		t.Fatalf("node order was not saved: %#v", nodes)
+	}
+	if err := s.ReorderNodes(ctx, []string{nodeA.ID}); err == nil {
+		t.Fatal("incomplete node order was accepted")
+	}
+}
+
+func TestRateLimitedProfileRequiresCompatibleAssignedAgents(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "ezhiklb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Bootstrap(ctx, "198.51.100.10", domain.DefaultProfileConfig(), "Default", true); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := s.ListProfiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := domain.DefaultProfileConfig()
+	config.Listeners = []domain.Listener{{
+		ID: "limited", Name: "Limited", Enabled: true, ListenPort: 443, Protocols: []domain.Protocol{domain.ProtocolTCP, domain.ProtocolUDP}, Scheduler: "wrr", RateLimitEnabled: true, RateLimitMbps: 450,
+		Backends: []domain.Backend{{ID: "b", Address: "192.0.2.10", Port: 443, Weight: 1, Enabled: true}},
+	}}
+	if _, _, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, config, true, "", false); !errors.Is(err, ErrRateLimitUnsupported) {
+		t.Fatalf("old agent rate-limit error = %v, want %v", err, ErrRateLimitUnsupported)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET agent_version='1.1.0' WHERE id='local'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PublishRevision(ctx, profiles[0].ID, profiles[0].Name, profiles[0].Description, config, true, "", false); err != nil {
+		t.Fatal(err)
+	}
 }
