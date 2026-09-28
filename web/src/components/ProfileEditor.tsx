@@ -187,7 +187,7 @@ function ListenerDialog({ initial, others, health, nodeAddresses, onSave, onClos
 
       <div className={`rate-limit-option ${listener.rate_limit_enabled ? "rate-limit-option--active" : ""}`}>
         <Switch label="Ограничить скорость записи" checked={Boolean(listener.rate_limit_enabled)} onChange={(enabled) => patch({ rate_limit_enabled: enabled, rate_limit_mbps: enabled ? listener.rate_limit_mbps || 100 : 0 })} />
-        <div className="rate-limit-option__copy"><strong>Максимальная пропускная способность</strong><span>Общий предел для TCP и UDP. На каждой ноде отдельно, одинаковое значение независимо для входящего и исходящего направления.</span></div>
+        <div className="rate-limit-option__copy"><strong>Максимальная пропускная способность UDP</strong><span>Лимит применяется к UDP/IPVS на каждой ноде отдельно и независимо для входящего и исходящего направления. TCP обслуживает HAProxy без этого лимита.</span></div>
         {listener.rate_limit_enabled && <Field label="Мбит/с" hint="1–100000" error={errors.rate_limit_mbps}><Input type="number" min={1} max={100000} step={1} value={listener.rate_limit_mbps ?? 100} aria-invalid={Boolean(errors.rate_limit_mbps)} onChange={(event) => patch({ rate_limit_mbps: Number(event.target.value) })} /></Field>}
       </div>
 

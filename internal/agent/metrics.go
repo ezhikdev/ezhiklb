@@ -53,8 +53,10 @@ func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
 	ram, err := readRAM("/proc/meminfo")
 	if err != nil { return domain.NodeMetrics{}, err }
 	load := readLoad("/proc/loadavg")
+	cores := runtime.NumCPU()
 	if now.Sub(c.lastActiveIPsScan) >= activeIPsScanInterval {
 		for _, address := range readActiveIPVSClients("/proc/net/ip_vs_conn") { c.seenIPs[address] = now }
+		for _, address := range readActiveHAProxyClients() { c.seenIPs[address] = now }
 		c.lastActiveIPsScan = now
 	}
 	cutoff := now.Add(-time.Minute)
@@ -74,7 +76,11 @@ func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
 		if rx >= base.rxBytes { rxBPS = uint64(float64(rx-base.rxBytes) / elapsed) }
 		if tx >= base.txBytes { txBPS = uint64(float64(tx-base.txBytes) / elapsed) }
 	}
-	return domain.NodeMetrics{RAMUsedPercent: ram, CPUUsedPercent: cpuPercent, Load1: load, CPUCores: runtime.NumCPU(), NetworkRxBPS: rxBPS, NetworkTxBPS: txBPS, ActiveIPs: len(c.seenIPs), CollectedAt: now}, nil
+	// The dashboard presents load relative to available vCPU capacity. This is
+	// intentionally derived from load1/cores: showing /proc/stat utilization
+	// beside "load X / N vCPU" produced contradictory values for operators.
+	if cores > 0 { cpuPercent = load * 100 / float64(cores); if cpuPercent > 100 { cpuPercent = 100 } }
+	return domain.NodeMetrics{RAMUsedPercent: ram, CPUUsedPercent: cpuPercent, Load1: load, CPUCores: cores, NetworkRxBPS: rxBPS, NetworkTxBPS: txBPS, ActiveIPs: len(c.seenIPs), CollectedAt: now}, nil
 }
 
 func readCPU(path string) (uint64, uint64, error) {

@@ -85,12 +85,21 @@ export interface NodeInfo {
   update_target?: string
   update_state?: "idle" | "requested" | "downloading" | "verifying" | "installing" | "restarting" | "completed" | "unsupported" | "error"
   update_error?: string
+  traffic_accounting_enabled: boolean
+  traffic_records_enabled: boolean
+  traffic_auto_reset_enabled: boolean
+  traffic_reset_day: number
+  traffic_incoming_bytes: number
+  traffic_outgoing_bytes: number
+  traffic_reset_at?: string
+  restart_nonce?: number
   updated_at: string
   sort_order: number
 }
 
 export interface NodeDiagnostics {
   ipvs_available: boolean
+  haproxy_available: boolean
   firewall_ready: boolean
   service_count: number
   destination_count: number
@@ -163,4 +172,14 @@ export interface ServiceStat {
   incoming_bytes: number
   outgoing_bytes: number
   collected_at: string
+}
+
+export interface TrafficTotal {
+  node_id: string
+  protocol?: Protocol
+  listen_address?: string
+  listen_port?: number
+  incoming_bytes: number
+  outgoing_bytes: number
+  updated_at: string
 }

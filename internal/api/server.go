@@ -84,6 +84,10 @@ func (s *Server) PanelHandler() http.Handler {
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", s.admin(http.HandlerFunc(s.revokeNode)))
 	mux.Handle("POST /api/v1/nodes/{id}/health-probe", s.admin(http.HandlerFunc(s.requestHealthProbe)))
 	mux.Handle("POST /api/v1/nodes/{id}/update", s.admin(http.HandlerFunc(s.requestNodeUpdate)))
+	mux.Handle("POST /api/v1/nodes/{id}/restart", s.admin(http.HandlerFunc(s.requestNodeRestart)))
+	mux.Handle("PUT /api/v1/nodes/{id}/traffic", s.admin(http.HandlerFunc(s.updateNodeTraffic)))
+	mux.Handle("POST /api/v1/nodes/{id}/traffic/reset", s.admin(http.HandlerFunc(s.resetNodeTraffic)))
+	mux.Handle("GET /api/v1/traffic", s.admin(http.HandlerFunc(s.listTrafficTotals)))
 	mux.Handle("GET /api/v1/health", s.admin(http.HandlerFunc(s.listHealth)))
 	mux.Handle("GET /api/v1/stats", s.admin(http.HandlerFunc(s.listStats)))
 	mux.Handle("GET /api/v1/metrics/history", s.admin(http.HandlerFunc(s.listMetricHistory)))
@@ -513,11 +517,34 @@ func (s *Server) requestNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if errors.Is(err, store.ErrManagedUpdateUnsupported) {
 		writeError(w, http.StatusConflict, "manual_update_required", "Первое обновление агента до beta.3.3 или новее нужно выполнить вручную")
+	} else if errors.Is(err, store.ErrInstallerUpdateRequired) {
+		writeError(w, http.StatusConflict, "installer_update_required", err.Error())
 	} else if err != nil {
 		s.internalError(w, err)
 	} else {
 		writeJSON(w, http.StatusAccepted, map[string]string{"version": Version})
 	}
+}
+
+func (s *Server) requestNodeRestart(w http.ResponseWriter, r *http.Request) {
+	nonce, err := s.store.RequestNodeRestart(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) { writeError(w,http.StatusNotFound,"not_found","Node not found") } else if err != nil { s.internalError(w,err) } else { writeJSON(w,http.StatusAccepted,map[string]int64{"restart_nonce":nonce}) }
+}
+
+func (s *Server) updateNodeTraffic(w http.ResponseWriter, r *http.Request) {
+	var body struct { Accounting bool `json:"accounting_enabled"`; Records bool `json:"records_enabled"`; AutoReset bool `json:"auto_reset_enabled"`; ResetDay int `json:"reset_day"` }
+	if err := decodeJSON(r,&body); err != nil { writeError(w,http.StatusBadRequest,"invalid_request",err.Error()); return }
+	if body.ResetDay == 0 { body.ResetDay = 1 }
+	err := s.store.UpdateTrafficSettings(r.Context(),r.PathValue("id"),body.Accounting,body.Records,body.AutoReset,body.ResetDay)
+	if errors.Is(err,store.ErrNotFound) { writeError(w,http.StatusNotFound,"not_found","Node not found") } else if err != nil { writeError(w,http.StatusUnprocessableEntity,"validation_failed",err.Error()) } else { w.WriteHeader(http.StatusNoContent) }
+}
+
+func (s *Server) resetNodeTraffic(w http.ResponseWriter, r *http.Request) {
+	err := s.store.ResetTraffic(r.Context(),r.PathValue("id")); if errors.Is(err,store.ErrNotFound) { writeError(w,http.StatusNotFound,"not_found","Node not found") } else if err != nil { s.internalError(w,err) } else { w.WriteHeader(http.StatusNoContent) }
+}
+
+func (s *Server) listTrafficTotals(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListTrafficTotals(r.Context(),r.URL.Query().Get("node_id")); if err != nil { s.internalError(w,err); return }; writeJSON(w,http.StatusOK,items)
 }
 
 func (s *Server) listHealth(w http.ResponseWriter, r *http.Request) {
@@ -606,7 +633,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до 1.1.0 перед применением ограничения скорости")
 		return
 	}
-	etag := fmt.Sprintf(`"rev-%d-probe-%d-update-%s"`, state.Revision, state.HealthProbe, state.UpdateVersion)
+	etag := fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d"`, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce)
 	if state.Decommission {
 		etag = fmt.Sprintf(`"rev-%d-probe-%d-decommission"`, state.Revision, state.HealthProbe)
 	}
@@ -630,6 +657,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		Diagnostics     domain.NodeDiagnostics `json:"diagnostics"`
 		UpdateState     string                 `json:"update_state"`
 		UpdateError     string                 `json:"update_error"`
+		RestartAck     int64                  `json:"restart_ack"`
 		Decommissioned  bool                   `json:"decommissioned"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -640,7 +668,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.PathValue("id") == "local" && (observedAddress == "127.0.0.1" || observedAddress == "::1") {
 		observedAddress = ""
 	}
-	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Diagnostics, body.UpdateState, body.UpdateError, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
+	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Diagnostics, body.UpdateState, body.UpdateError, body.RestartAck, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
 		s.internalError(w, err)
@@ -773,6 +801,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

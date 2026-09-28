@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -41,6 +42,38 @@ func TestResolveVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCounterDeltaHandlesProcessCounterReset(t *testing.T) {
+	if got := counterDelta(140,100); got != 40 { t.Fatalf("normal delta=%d, want 40",got) }
+	if got := counterDelta(12,900); got != 12 { t.Fatalf("reset delta=%d, want 12",got) }
+}
+
+func TestTrafficResetDueClampsDayToEndOfMonth(t *testing.T) {
+	now := time.Date(2026,time.February,28,12,0,0,0,time.UTC)
+	if !trafficResetDue(now,31,sql.NullString{}) { t.Fatal("day 31 should be due on February's last day") }
+	last := sql.NullString{String: formatTime(time.Date(2026,time.February,28,1,0,0,0,time.UTC)),Valid:true}
+	if trafficResetDue(now,31,last) { t.Fatal("already reset current period was considered due") }
+}
+
+func TestTrafficAccountingAccumulatesDeltasAndResets(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(),"traffic.db")); if err != nil { t.Fatal(err) }; defer s.Close()
+	if err := s.Bootstrap(ctx,"198.51.100.10",domain.DefaultProfileConfig(),"Default",true); err != nil { t.Fatal(err) }
+	if err := s.UpdateTrafficSettings(ctx,"local",true,true,false,1); err != nil { t.Fatal(err) }
+	heartbeat := func(incoming,outgoing uint64) {
+		stats := []domain.ServiceStat{{Protocol:domain.ProtocolUDP,ListenAddress:"198.51.100.10",ListenPort:8002,IncomingBytes:incoming,OutgoingBytes:outgoing,CollectedAt:time.Now().UTC()}}
+		metrics := domain.NodeMetrics{CollectedAt:time.Now().UTC()}
+		if err := s.Heartbeat(ctx,"local","1.2.0","","applied",1,"",nil,stats,metrics,domain.NodeDiagnostics{},"idle","",0,false); err != nil { t.Fatal(err) }
+	}
+	heartbeat(100,200); heartbeat(160,260)
+	nodes, err := s.ListNodes(ctx); if err != nil { t.Fatal(err) }
+	if nodes[0].TrafficIncomingBytes != 160 || nodes[0].TrafficOutgoingBytes != 260 { t.Fatalf("node traffic=%d/%d, want 160/260",nodes[0].TrafficIncomingBytes,nodes[0].TrafficOutgoingBytes) }
+	totals, err := s.ListTrafficTotals(ctx,"local"); if err != nil { t.Fatal(err) }
+	if len(totals)!=1 || totals[0].IncomingBytes!=160 || totals[0].OutgoingBytes!=260 { t.Fatalf("record totals=%#v",totals) }
+	if err := s.ResetTraffic(ctx,"local"); err != nil { t.Fatal(err) }
+	nodes, _ = s.ListNodes(ctx); totals, _ = s.ListTrafficTotals(ctx,"local")
+	if nodes[0].TrafficIncomingBytes != 0 || nodes[0].TrafficOutgoingBytes != 0 || len(totals)!=0 { t.Fatalf("traffic reset failed: node=%#v totals=%#v",nodes[0],totals) }
 }
 
 func TestBootstrapReconcilesLocalNodeWithInstallRole(t *testing.T) {

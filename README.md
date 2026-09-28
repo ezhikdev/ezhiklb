@@ -2,16 +2,17 @@
 
 > Лёгкая web-панель для управления TCP- и UDP-балансировкой на Linux.
 
-**EzhikLB (Ezhik Load Balancer)** объединяет панель управления, переиспользуемые профили и удалённые ноды. Трафик обрабатывается IPVS непосредственно в ядре Linux, а панель отвечает за конфигурацию, health-check, наблюдение и обновления.
+**EzhikLB (Ezhik Load Balancer)** объединяет панель управления, переиспользуемые профили и удалённые ноды. TCP проксирует HAProxy Community, UDP остаётся на IPVS NAT в ядре Linux, а панель отвечает за конфигурацию, health-check, наблюдение и обновления.
 
-![Version](https://img.shields.io/badge/version-1.1.0-65c795?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.2.0-65c795?style=flat-square)
 ![Protocols](https://img.shields.io/badge/protocols-TCP%20%2B%20UDP-e7e3dc?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Linux-9fa6b2?style=flat-square)
 
 ## Главное
 
 - TCP, UDP или оба протокола в одной записи;
-- необязательный общий лимит Мбит/с для TCP + UDP одной записи, отдельно на каждой ноде и в каждом направлении;
+- необязательный лимит Мбит/с для UDP/IPVS, отдельно на каждой ноде и в каждом направлении;
+- накопительный учёт входящего/исходящего трафика по ноде и каждой записи, ручной и ежемесячный сброс;
 - балансировка по весам и планировщики `wrr` / `rr`;
 - Affinity для закрепления IP клиента за backend;
 - ICMP health-check с автоматическим исключением недоступных адресов;
@@ -20,7 +21,7 @@
 - сохраняемый drag-and-drop порядок записей, профилей и нод;
 - одноразовый сброс affinity и перераспределение клиентов при публикации профиля;
 - графики RAM, CPU, сети и активных IP;
-- состояние IPVS, firewall и применения конфигурации;
+- состояние HAProxy, IPVS, firewall и применения конфигурации;
 - обновление подключённых нод одной кнопкой с проверкой SHA-256;
 - сохранение последней конфигурации на ноде: трафик продолжает работать при недоступной панели.
 
@@ -28,7 +29,7 @@
 
 Таблица сравнивает EzhikLB с базовыми open-source установками без сторонних панелей и коммерческих модулей.
 
-| Возможность | EzhikLB 1.1 | NGINX Open Source | HAProxy Community |
+| Возможность | EzhikLB 1.2 | NGINX Open Source | HAProxy Community |
 |---|:---:|:---:|:---:|
 | Балансировка TCP | Да | Да, модуль `stream` | Да |
 | Универсальная балансировка UDP | Да | Да, модуль `stream` | Нет, UDP-модуль относится к HAProxy Enterprise |
@@ -39,7 +40,7 @@
 | Централизованное управление несколькими нодами | Да | Нет | Нет |
 | Общие профили и назначение на ноды | Да | Нет | Нет |
 | История версий и откат профиля | Да | Нет | Нет |
-| Обновление ноды одной кнопкой | Да | Нет | Нет |
+| Обновление ноды одной кнопкой | Да; переход на 1.2 требует install.sh | Нет | Нет |
 | Работа data plane без панели | Да | Да | Да |
 
 NGINX умеет универсально проксировать TCP/UDP через `stream`, но периодические активные health-check и динамическая конфигурация upstream описаны как возможности коммерческой подписки. HAProxy Community отлично подходит для TCP/HTTP и имеет страницу статистики, однако универсальная UDP-балансировка поставляется отдельным модулем HAProxy Enterprise. Источники: [NGINX stream](https://nginx.org/en/docs/stream/ngx_stream_upstream_module.html), [NGINX active health checks](https://nginx.org/en/docs/stream/ngx_stream_upstream_hc_module.html), [HAProxy UDP module](https://www.haproxy.com/documentation/haproxy-enterprise/enterprise-modules/udp-load-balancing/overview/), [HAProxy Stats page](https://www.haproxy.com/blog/exploring-the-haproxy-stats-page).
@@ -49,12 +50,13 @@ EzhikLB ориентирован именно на простое управле
 ## Как устроено
 
 ```text
-Браузер → Панель EzhikLB → API нод → Агент → IPVS → Backend-серверы
+Браузер → Панель EzhikLB → API нод → Агент → HAProxy (TCP) / IPVS NAT (UDP) → Backend-серверы
 ```
 
 - **Панель** хранит профили, версии, ноды, события и телеметрию.
 - **Агент** применяет назначенный профиль и отправляет состояние ноды.
-- **IPVS** обрабатывает пользовательский TCP/UDP-трафик в ядре Linux.
+- **HAProxy** обслуживает TCP-прокси и отдаёт статистику по frontend/backend.
+- **IPVS NAT** обрабатывает UDP-трафик в ядре Linux без изменения прежней схемы.
 
 Панель не находится в пути пользовательского трафика. Если она временно выключена, уже применённые правила и health-check продолжают работать на нодах.
 
@@ -71,13 +73,13 @@ EzhikLB ориентирован именно на простое управле
 Одна команда запускает интерактивный установщик. Внутри можно выбрать панель, ноду или оба компонента:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=1.1.0 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=1.2.0 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
 Варианты установки:
 
 1. **Панель** — web-интерфейс и API управления нодами; локальный агент и локальная нода не создаются.
-2. **Нода** — только агент и IPVS data plane.
+2. **Нода** — агент, HAProxy для TCP и IPVS/NAT для UDP.
 3. **Панель + локальная нода** — управление и балансировка на одном VPS.
 
 При новой установке панели скрипт отдельно спросит порт web-интерфейса (`8080` по умолчанию)
@@ -124,12 +126,16 @@ ssh -L 8080:127.0.0.1:8080 root@IP_ПАНЕЛИ
 
 Веса `1 + 1` дают примерно `50% / 50%`, а `2 + 1` — примерно `66% / 33%`. Для VPN и долгоживущих UDP-сессий разумная начальная настройка Affinity — **3 часа**.
 
-Лимит скорости записи задаётся в Мбит/с и по умолчанию выключен. Если запись
-обслуживает TCP и UDP на одном порту, оба протокола делят один лимит. На каждой
-ноде он считается отдельно; при значении `450` входящее и исходящее направления
-могут независимо использовать до 450 Мбит/с каждое. Для публикации такого
-профиля все уже назначенные ноды должны работать на агенте `1.1.0` или новее.
-Профили без включённого лимита не добавляют и не меняют правила ограничения.
+Лимит скорости записи задаётся в Мбит/с и по умолчанию выключен. В 1.2.0 он
+применяется к UDP/IPVS; TCP обслуживается HAProxy вне IPVS-aware limiter. На
+каждой ноде UDP считается отдельно; при значении `450` входящее и исходящее
+направления могут независимо использовать до 450 Мбит/с каждое. Профили без
+включённого лимита не добавляют и не меняют правила ограничения.
+
+Переход с 1.1.x на 1.2.0 нужно один раз выполнить полным `install.sh`: он
+устанавливает пакет HAProxy и отдельный `ezhiklb-haproxy.service`, не изменяя
+системный `/etc/haproxy/haproxy.cfg`. После этого обычные бинарные обновления
+снова доступны из панели.
 
 ICMP health-check проверяет доступность IP-адреса, но не подтверждает работу конкретного приложения на TCP/UDP-порту.
 

@@ -114,8 +114,11 @@ func (m *HealthMonitor) checkAll(ctx context.Context, config domain.HealthCheck,
 		m.results[address] = result
 		m.mu.Unlock()
 
-		if result.State != previous && result.State != ReachabilityUnknown {
+		if result.State != ReachabilityUnknown {
+			// Re-assert the decision after an independent HAProxy restart too.
 			m.applyAddressState(ctx, services, address, result.State)
+		}
+		if result.State != previous && result.State != ReachabilityUnknown {
 			m.logger.Info("backend reachability changed", "address", address, "state", result.State)
 		}
 	}

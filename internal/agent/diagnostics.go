@@ -15,6 +15,7 @@ var tcDroppedPattern = regexp.MustCompile(`(?i)dropped\s+([0-9]+)`)
 // CollectDiagnostics reports read-only data-plane checks.
 func CollectDiagnostics(ctx context.Context, runner Runner, services []Service, controls ...[]TrafficControl) domain.NodeDiagnostics {
 	result := domain.NodeDiagnostics{CheckedAt: time.Now().UTC(), ServiceCount: len(services)}
+	result.HAProxyAvailable = len(onlyProtocol(services, domain.ProtocolTCP)) == 0
 	for _, service := range services {
 		result.DestinationCount += len(service.Destinations)
 	}
@@ -22,6 +23,9 @@ func CollectDiagnostics(ctx context.Context, runner Runner, services []Service, 
 		result.IPVSAvailable = true
 	} else {
 		result.Error = err.Error()
+	}
+	if len(onlyProtocol(services, domain.ProtocolTCP)) > 0 {
+		if _, err := runner.Run(ctx, "systemctl", []string{"is-active", "--quiet", "ezhiklb-haproxy.service"}, ""); err == nil { result.HAProxyAvailable = true } else if result.Error == "" { result.Error = err.Error() }
 	}
 	filter, filterErr := runner.Run(ctx, "iptables", []string{"-w", "5", "-S", "EZHIKLB-FORWARD"}, "")
 	nat, natErr := runner.Run(ctx, "iptables", []string{"-w", "5", "-t", "nat", "-S", "EZHIKLB-SNAT"}, "")

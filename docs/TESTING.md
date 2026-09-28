@@ -191,3 +191,13 @@ Run these only on disposable test VPS nodes.
 53. On a node that has only ever been updated via the panel's one-click button (never re-run `install.sh` manually), trigger a self-update to `1.0.10` and confirm `cat /etc/ezhiklb/version` reads `1.0.10` afterward — not whatever version that node was first installed with. This requires the node's *previous* agent version to already have the corrected `ReadWritePaths=` (including `${CONFIG_DIR}`) from this release's `install.sh`; a node still on the old unit file will fail to write the file silently (best-effort) until `install.sh` is run once more to refresh its systemd unit.
 54. Run the ordinary manual upgrade command (`curl` + `install.sh`, no `EZHIKLB_ROLE`/credentials) against a node that was previously only self-updated, and confirm it now says `Existing EzhikLB 1.0.10 detected` (matching the real running version) instead of a stale version from its original install.
 55. Confirm `systemctl cat ezhiklb-agent.service` shows `ReadWritePaths=... /etc/ezhiklb` and that `ezhiklb.env` (credentials) is unaffected — this only adds write access for the agent's own use, nothing reads/writes secrets differently.
+
+## 1.2.0 acceptance checks — HAProxy TCP and traffic accounting
+
+56. Upgrade a 1.1.x node with the full `install.sh`. Confirm `haproxy` is installed, `ezhiklb-haproxy.service` uses `/var/lib/ezhiklb-agent/haproxy.cfg`, and the package's `/etc/haproxy/haproxy.cfg` is unchanged.
+57. Apply a dual TCP+UDP record. Confirm TCP appears in the HAProxy runtime stats but not `ipvsadm -Ln`; confirm UDP remains in IPVS with `-m` NAT destinations and does not appear as an HAProxy frontend.
+58. Reboot the VPS with the panel unavailable. Confirm the agent restores HAProxy TCP, IPVS/NAT UDP, firewall and UDP rate-limit state from `state.json`.
+59. Enable the node total and all record counters, send traffic in both directions, and compare the panel with HAProxy `show stat` plus `ipvsadm -Ln --stats --exact`. Restart both data planes and confirm accumulated panel totals do not decrease.
+60. Test manual reset, automatic reset days 1 and 31 (including a short month), and disabled states. The reset-day input must be absent while automatic reset is off, and the node-list total must be absent while node accounting is off.
+61. Use the panel service-restart button. Confirm the request is acknowledged before `ezhiklb-agent.service` restarts, the VPS is not rebooted, the action does not loop, and the active data plane remains available.
+62. On a 2-vCPU node with load1 near `0.82`, confirm the displayed CPU load is approximately `41%` and the detail text remains `load 0.82 / 2 vCPU`.

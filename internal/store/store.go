@@ -20,6 +20,7 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrManagedUpdateUnsupported = errors.New("the node agent must be updated manually to beta.3.3 or newer once")
+var ErrInstallerUpdateRequired = errors.New("version 1.2.0 requires a one-time install.sh upgrade to install the isolated HAProxy service")
 var ErrNodeNotPendingDeletion = errors.New("node is not pending deletion")
 var ErrResetUnsupported = errors.New("сначала обновите все назначенные ноды до 1.0.7, чтобы сбросить распределение клиентов")
 var ErrRateLimitUnsupported = errors.New("сначала обновите все назначенные ноды до 1.1.0, чтобы включить ограничение скорости")
@@ -154,6 +155,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			collected_at TEXT NOT NULL,
 			PRIMARY KEY(node_id, collected_at)
 		)`,
+		`CREATE TABLE IF NOT EXISTS traffic_totals (
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			protocol TEXT NOT NULL,
+			listen_address TEXT NOT NULL,
+			listen_port INTEGER NOT NULL,
+			incoming_bytes INTEGER NOT NULL DEFAULT 0,
+			outgoing_bytes INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(node_id, protocol, listen_address, listen_port)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -180,6 +191,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"auto_version", `INTEGER NOT NULL DEFAULT 1`},
 		{"version_label", `TEXT NOT NULL DEFAULT ''`},
 		{"sort_order", `INTEGER NOT NULL DEFAULT 0`},
+		{"traffic_accounting_enabled", `INTEGER NOT NULL DEFAULT 0`},
+		{"traffic_records_enabled", `INTEGER NOT NULL DEFAULT 0`},
+		{"traffic_auto_reset_enabled", `INTEGER NOT NULL DEFAULT 0`},
+		{"traffic_reset_day", `INTEGER NOT NULL DEFAULT 1`},
+		{"traffic_incoming_bytes", `INTEGER NOT NULL DEFAULT 0`},
+		{"traffic_outgoing_bytes", `INTEGER NOT NULL DEFAULT 0`},
+		{"traffic_reset_at", `TEXT`},
+		{"restart_nonce", `INTEGER NOT NULL DEFAULT 0`},
+		{"restart_ack", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		table := "nodes"
 		if column.name == "auto_version" || column.name == "version_label" {
@@ -627,6 +647,7 @@ func (s *Store) DeleteProfile(ctx context.Context, profileID string) error {
 }
 
 func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
+	if err := s.applyDueTrafficResets(ctx, time.Now().UTC()); err != nil { return nil, err }
 	rows, err := s.db.QueryContext(ctx, nodeSelect+` ORDER BY sort_order,name`)
 	if err != nil {
 		return nil, err
@@ -822,6 +843,35 @@ func (s *Store) UpdateNode(ctx context.Context, nodeID, name, ingressAddress str
 	return s.Audit(ctx, "node.updated", "node", nodeID, map[string]any{"name": name, "ingress_address": ingressAddress})
 }
 
+func (s *Store) UpdateTrafficSettings(ctx context.Context, nodeID string, accounting, records, autoReset bool, resetDay int) error {
+	if resetDay < 1 || resetDay > 31 { return errors.New("traffic reset day must be between 1 and 31") }
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET traffic_accounting_enabled=?,traffic_records_enabled=?,traffic_auto_reset_enabled=?,traffic_reset_day=?,updated_at=? WHERE id=?`, accounting, records, autoReset, resetDay, formatTime(time.Now().UTC()), nodeID)
+	if err != nil { return err }
+	if affected, _ := result.RowsAffected(); affected == 0 { return ErrNotFound }
+	return s.Audit(ctx, "node.traffic_settings_updated", "node", nodeID, map[string]any{"accounting": accounting, "records": records, "auto_reset": autoReset, "reset_day": resetDay})
+}
+
+func (s *Store) ResetTraffic(ctx context.Context, nodeID string) error {
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil); if err != nil { return err }; defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET traffic_incoming_bytes=0,traffic_outgoing_bytes=0,traffic_reset_at=?,updated_at=? WHERE id=?`, formatTime(now), formatTime(now), nodeID)
+	if err != nil { return err }
+	if affected, _ := result.RowsAffected(); affected == 0 { return ErrNotFound }
+	if _, err := tx.ExecContext(ctx, `DELETE FROM traffic_totals WHERE node_id=?`, nodeID); err != nil { return err }
+	if err := auditTx(ctx, tx, "node.traffic_reset", "node", nodeID, map[string]any{}); err != nil { return err }
+	return tx.Commit()
+}
+
+func (s *Store) RequestNodeRestart(ctx context.Context, nodeID string) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET restart_nonce=restart_nonce+1,updated_at=? WHERE id=? AND status<>'disabled'`, formatTime(time.Now().UTC()), nodeID)
+	if err != nil { return 0, err }
+	if affected, _ := result.RowsAffected(); affected == 0 { return 0, ErrNotFound }
+	var nonce int64
+	if err := s.db.QueryRowContext(ctx, `SELECT restart_nonce FROM nodes WHERE id=?`, nodeID).Scan(&nonce); err != nil { return 0, err }
+	_ = s.Audit(ctx, "node.restart_requested", "node", nodeID, map[string]any{"nonce": nonce})
+	return nonce, nil
+}
+
 func (s *Store) DeleteNode(ctx context.Context, nodeID string) error {
 	if nodeID == "local" {
 		return errors.New("local node cannot be deleted")
@@ -910,12 +960,12 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 	var result domain.NodeDesiredState
 	var configJSON string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.reset_revision=n.desired_revision,n.status='deleting',n.update_target,r.config_json
+		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.reset_revision=n.desired_revision,n.status='deleting',n.update_target,CASE WHEN n.restart_nonce>n.restart_ack THEN n.restart_nonce ELSE 0 END,r.config_json
 		FROM nodes n
 		JOIN profiles p ON p.id=n.profile_id
 		JOIN profile_revisions r ON r.profile_id=p.id AND r.number=n.desired_revision
 		LEFT JOIN node_probe_requests q ON q.node_id=n.id
-		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.ResetConnections, &result.Decommission, &result.UpdateVersion, &configJSON)
+		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.ResetConnections, &result.Decommission, &result.UpdateVersion, &result.RestartNonce, &configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrNotFound
 	}
@@ -938,6 +988,7 @@ func (s *Store) RequestNodeUpdate(ctx context.Context, nodeID, version string) e
 	if !agentSupportsManagedUpdate(agentVersion) {
 		return ErrManagedUpdateUnsupported
 	}
+	if domain.CompareVersions(agentVersion,"1.2.0") < 0 && domain.CompareVersions(version,"1.2.0") >= 0 { return ErrInstallerUpdateRequired }
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET update_target=?,update_state='requested',update_error='',updated_at=? WHERE id=? AND status<>'disabled'`, version, formatTime(time.Now().UTC()), nodeID)
 	if err != nil {
 		return err
@@ -968,7 +1019,7 @@ func (s *Store) RequestHealthProbe(ctx context.Context, nodeID string) (int64, e
 	return nonce, nil
 }
 
-func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, diagnostics domain.NodeDiagnostics, updateState, updateError string, decommissioned bool) error {
+func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, diagnostics domain.NodeDiagnostics, updateState, updateError string, restartAck int64, decommissioned bool) error {
 	status := "online"
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -976,6 +1027,7 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 		return err
 	}
 	defer tx.Rollback()
+	if err := applyDueTrafficResetTx(ctx, tx, nodeID, now); err != nil { return err }
 	var previousStatus, previousError string
 	var previousSeen, previousOnline sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT status,last_seen_at,online_since,last_error FROM nodes WHERE id=? AND status<>'disabled'`, nodeID).Scan(&previousStatus, &previousSeen, &previousOnline, &previousError); errors.Is(err, sql.ErrNoRows) {
@@ -1039,8 +1091,8 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	if updateTarget == "" && previousUpdateState == "completed" && updateState == "idle" {
 		updateState = "completed"
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,updated_at=? WHERE id=? AND status<>'disabled'`,
-		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, formatTime(now), nodeID)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,restart_ack=CASE WHEN ?>restart_ack THEN ? ELSE restart_ack END,updated_at=? WHERE id=? AND status<>'disabled'`,
+		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, restartAck, restartAck, formatTime(now), nodeID)
 	if err != nil {
 		return err
 	}
@@ -1078,6 +1130,7 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 		}
 	}
 	if stats != nil {
+		if err := accumulateTrafficTx(ctx, tx, nodeID, stats, now); err != nil { return err }
 		if _, err := tx.ExecContext(ctx, `DELETE FROM service_stats WHERE node_id=?`, nodeID); err != nil {
 			return err
 		}
@@ -1170,6 +1223,77 @@ func (s *Store) ListStats(ctx context.Context) ([]domain.ServiceStat, error) {
 	return result, rows.Err()
 }
 
+func (s *Store) ListTrafficTotals(ctx context.Context, nodeID string) ([]domain.TrafficTotal, error) {
+	query := `SELECT node_id,protocol,listen_address,listen_port,incoming_bytes,outgoing_bytes,updated_at FROM traffic_totals`
+	args := []any{}
+	if nodeID != "" { query += ` WHERE node_id=?`; args = append(args, nodeID) }
+	query += ` ORDER BY node_id,listen_port,protocol`
+	rows, err := s.db.QueryContext(ctx, query, args...); if err != nil { return nil, err }; defer rows.Close()
+	result := make([]domain.TrafficTotal, 0)
+	for rows.Next() { var item domain.TrafficTotal; var updated string; if err := rows.Scan(&item.NodeID,&item.Protocol,&item.ListenAddress,&item.ListenPort,&item.IncomingBytes,&item.OutgoingBytes,&updated); err != nil { return nil, err }; item.UpdatedAt, err = parseTime(updated); if err != nil { return nil, err }; result = append(result,item) }
+	return result, rows.Err()
+}
+
+func counterDelta(current, previous uint64) uint64 {
+	if current >= previous { return current - previous }
+	return current
+}
+
+func statCounterKey(protocol domain.Protocol, address string, port uint16) string {
+	return fmt.Sprintf("%s/%s:%d", protocol, address, port)
+}
+
+func accumulateTrafficTx(ctx context.Context, tx *sql.Tx, nodeID string, stats []domain.ServiceStat, now time.Time) error {
+	previous := map[string]domain.ServiceStat{}
+	rows, err := tx.QueryContext(ctx, `SELECT protocol,listen_address,listen_port,incoming_bytes,outgoing_bytes FROM service_stats WHERE node_id=? AND backend_address=''`, nodeID)
+	if err != nil { return err }
+	for rows.Next() { var item domain.ServiceStat; if err := rows.Scan(&item.Protocol,&item.ListenAddress,&item.ListenPort,&item.IncomingBytes,&item.OutgoingBytes); err != nil { rows.Close(); return err }; previous[statCounterKey(item.Protocol,item.ListenAddress,item.ListenPort)] = item }
+	if err := rows.Close(); err != nil { return err }
+	var accounting, records bool
+	if err := tx.QueryRowContext(ctx, `SELECT traffic_accounting_enabled,traffic_records_enabled FROM nodes WHERE id=?`, nodeID).Scan(&accounting,&records); err != nil { return err }
+	var nodeIn, nodeOut uint64
+	for _, item := range stats {
+		if item.BackendAddress != "" { continue }
+		old := previous[statCounterKey(item.Protocol,item.ListenAddress,item.ListenPort)]
+		incoming := counterDelta(item.IncomingBytes, old.IncomingBytes)
+		outgoing := counterDelta(item.OutgoingBytes, old.OutgoingBytes)
+		nodeIn += incoming; nodeOut += outgoing
+		if records {
+			_, err := tx.ExecContext(ctx, `INSERT INTO traffic_totals(node_id,protocol,listen_address,listen_port,incoming_bytes,outgoing_bytes,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id,protocol,listen_address,listen_port) DO UPDATE SET incoming_bytes=incoming_bytes+excluded.incoming_bytes,outgoing_bytes=outgoing_bytes+excluded.outgoing_bytes,updated_at=excluded.updated_at`, nodeID,item.Protocol,item.ListenAddress,item.ListenPort,incoming,outgoing,formatTime(now))
+			if err != nil { return err }
+		}
+	}
+	if accounting && (nodeIn > 0 || nodeOut > 0) { _, err = tx.ExecContext(ctx, `UPDATE nodes SET traffic_incoming_bytes=traffic_incoming_bytes+?,traffic_outgoing_bytes=traffic_outgoing_bytes+? WHERE id=?`, nodeIn,nodeOut,nodeID) }
+	return err
+}
+
+func trafficResetDue(now time.Time, day int, last sql.NullString) bool {
+	if day < 1 { day = 1 }; if day > 31 { day = 31 }
+	lastDay := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	if day > lastDay { day = lastDay }
+	due := time.Date(now.Year(), now.Month(), day, 0, 0, 0, 0, time.UTC)
+	if now.Before(due) { return false }
+	if !last.Valid || last.String == "" { return true }
+	parsed, err := parseTime(last.String)
+	return err != nil || parsed.Before(due)
+}
+
+func applyDueTrafficResetTx(ctx context.Context, tx *sql.Tx, nodeID string, now time.Time) error {
+	var enabled bool; var day int; var last sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT traffic_auto_reset_enabled,traffic_reset_day,traffic_reset_at FROM nodes WHERE id=?`, nodeID).Scan(&enabled,&day,&last); err != nil { return err }
+	if !enabled || !trafficResetDue(now, day, last) { return nil }
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET traffic_incoming_bytes=0,traffic_outgoing_bytes=0,traffic_reset_at=? WHERE id=?`, formatTime(now),nodeID); err != nil { return err }
+	_, err := tx.ExecContext(ctx, `DELETE FROM traffic_totals WHERE node_id=?`, nodeID)
+	return err
+}
+
+func (s *Store) applyDueTrafficResets(ctx context.Context, now time.Time) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM nodes WHERE traffic_auto_reset_enabled=1`); if err != nil { return err }
+	ids := make([]string,0); for rows.Next() { var id string; if err := rows.Scan(&id); err != nil { rows.Close(); return err }; ids=append(ids,id) }; if err := rows.Close(); err != nil { return err }
+	for _, id := range ids { tx, err := s.db.BeginTx(ctx,nil); if err != nil { return err }; if err = applyDueTrafficResetTx(ctx,tx,id,now); err == nil { err=tx.Commit() } else { _=tx.Rollback() }; if err != nil { return err } }
+	return nil
+}
+
 func (s *Store) ListMetricHistory(ctx context.Context, nodeID string) ([]domain.NodeMetricPoint, error) {
 	query := `SELECT node_id,ram_used_percent,cpu_used_percent,load_1,network_rx_bps,network_tx_bps,active_ips,collected_at FROM node_metric_history WHERE collected_at>=?`
 	args := []any{formatTime(time.Now().UTC().Add(-24 * time.Hour))}
@@ -1234,15 +1358,15 @@ func (s *Store) getRevision(ctx context.Context, profileID string, number int64)
 	return r, err
 }
 
-const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,sort_order,created_at,updated_at FROM nodes`
+const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,traffic_accounting_enabled,traffic_records_enabled,traffic_auto_reset_enabled,traffic_reset_day,traffic_incoming_bytes,traffic_outgoing_bytes,traffic_reset_at,restart_nonce,sort_order,created_at,updated_at FROM nodes`
 
 func scanNode(row scanner) (domain.Node, error) {
 	var n domain.Node
-	var lastSeen, onlineSince, metricsAt sql.NullString
+	var lastSeen, onlineSince, metricsAt, trafficResetAt sql.NullString
 	var created, updated string
 	var metrics domain.NodeMetrics
 	var diagnosticsJSON string
-	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &n.SortOrder, &created, &updated)
+	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &n.TrafficAccountingEnabled, &n.TrafficRecordsEnabled, &n.TrafficAutoResetEnabled, &n.TrafficResetDay, &n.TrafficIncomingBytes, &n.TrafficOutgoingBytes, &trafficResetAt, &n.RestartNonce, &n.SortOrder, &created, &updated)
 	if err != nil {
 		return n, err
 	}
@@ -1268,6 +1392,7 @@ func scanNode(row scanner) (domain.Node, error) {
 		metrics.CollectedAt = parsed
 		n.Metrics = &metrics
 	}
+	if trafficResetAt.Valid && trafficResetAt.String != "" { parsed, parseErr := parseTime(trafficResetAt.String); if parseErr != nil { return n, parseErr }; n.TrafficResetAt = &parsed }
 	var diagnostics domain.NodeDiagnostics
 	if json.Unmarshal([]byte(diagnosticsJSON), &diagnostics) == nil && !diagnostics.CheckedAt.IsZero() {
 		n.Diagnostics = &diagnostics

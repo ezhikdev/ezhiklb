@@ -65,6 +65,7 @@ type AppliedState struct {
 	Services        []Service          `json:"services"`
 	HealthCheck     domain.HealthCheck `json:"health_check"`
 	TrafficControls []TrafficControl   `json:"traffic_controls,omitempty"`
+	DataPlaneVersion string            `json:"data_plane_version,omitempty"`
 }
 
 type Reconciler struct {
@@ -128,6 +129,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if err := r.configureKernel(ctx); err != nil {
 		return err
 	}
+	if err := r.migrateLegacyTCP(ctx, &old); err != nil { return err }
 	if err := r.warmRoutes(ctx, services); err != nil {
 		r.logger.Warn("route warm-up was incomplete", "error", err)
 	}
@@ -149,12 +151,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 		}
 		return fmt.Errorf("apply IPVS: %w (previous state restored)", err)
 	}
+	if len(onlyProtocol(old.Services, domain.ProtocolTCP))+len(onlyProtocol(services, domain.ProtocolTCP)) > 0 {
+	if err := r.applyHAProxy(ctx, services); err != nil {
+		rollbackErr := r.applyHAProxy(ctx, old.Services)
+		_ = r.applyIPVS(ctx, services, old.Services)
+		_ = r.applyFirewall(ctx, old.Services)
+		if rollbackErr != nil { return fmt.Errorf("apply HAProxy: %v; rollback also failed: %w", err, rollbackErr) }
+		return fmt.Errorf("apply HAProxy: %w (previous state restored)", err)
+	}
+	}
 	if err := r.applyFirewall(ctx, services); err != nil {
 		return fmt.Errorf("finalize firewall: %w", err)
 	}
-	controls, trafficErr := r.reconcileTrafficControl(ctx, old.TrafficControls, services)
+	controls, trafficErr := r.reconcileTrafficControl(ctx, old.TrafficControls, onlyProtocol(services, domain.ProtocolUDP))
 	if trafficErr != nil {
-		_, rollbackTrafficErr := r.reconcileTrafficControl(ctx, controls, old.Services)
+		_, rollbackTrafficErr := r.reconcileTrafficControl(ctx, controls, onlyProtocol(old.Services, domain.ProtocolUDP))
 		rollbackIPVSErr := r.applyIPVS(ctx, services, old.Services)
 		_ = r.applyFirewall(ctx, old.Services)
 		if rollbackTrafficErr != nil || rollbackIPVSErr != nil {
@@ -162,7 +173,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 		}
 		return fmt.Errorf("apply rate limit: %w (previous state restored)", trafficErr)
 	}
-	return r.saveState(AppliedState{Revision: desired.Revision, Services: services, HealthCheck: desired.Config.HealthCheck, TrafficControls: controls})
+	return r.saveState(AppliedState{Revision: desired.Revision, Services: services, HealthCheck: desired.Config.HealthCheck, TrafficControls: controls, DataPlaneVersion: "haproxy-tcp"})
+}
+
+func (r *Reconciler) migrateLegacyTCP(ctx context.Context, state *AppliedState) error {
+	if state.DataPlaneVersion == "haproxy-tcp" { return nil }
+	if len(onlyProtocol(state.Services, domain.ProtocolTCP)) > 0 {
+		// Bring up the equivalent proxy configuration before removing the
+		// legacy IPVS virtual services, so a 1.1 -> 1.2 handover has no
+		// intentional TCP gap and a missing HAProxy dependency cannot remove
+		// the still-working legacy path.
+		if err := r.applyHAProxy(ctx,state.Services); err != nil { return fmt.Errorf("prepare HAProxy before TCP migration: %w",err) }
+	}
+	for _, service := range onlyProtocol(state.Services, domain.ProtocolTCP) {
+		if err := r.deleteService(ctx, service); err != nil {
+			output, inspectErr := r.runner.Run(ctx,"ipvsadm",[]string{"-Ln"},"")
+			stillPresent := false
+			for _, line := range strings.Split(output,"\n") { fields:=strings.Fields(line); if len(fields)>=2 && fields[0]=="TCP" && fields[1]==virtualAddress(service) { stillPresent=true; break } }
+			if inspectErr != nil || stillPresent { return fmt.Errorf("remove legacy TCP IPVS service %s: %w", virtualAddress(service), err) }
+		}
+	}
+	state.DataPlaneVersion = "haproxy-tcp"
+	return nil
 }
 
 // resetConnectionState deliberately interrupts only flows owned by EzhikLB.
@@ -193,6 +225,9 @@ func (r *Reconciler) resetConnectionState(ctx context.Context, oldServices, desi
 		}
 		return fmt.Errorf("recreate managed services: %w (previous state restored)", err)
 	}
+	if len(onlyProtocol(oldServices, domain.ProtocolTCP))+len(onlyProtocol(desiredServices, domain.ProtocolTCP)) > 0 {
+		if err := r.applyHAProxy(ctx, desiredServices); err != nil { return fmt.Errorf("reload HAProxy connection state: %w", err) }
+	}
 	return nil
 }
 
@@ -219,6 +254,8 @@ func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Se
 	if err != nil {
 		return fmt.Errorf("inspect occupied ports: %w", err)
 	}
+	owned := map[string]bool{}
+	if state, loadErr := r.loadState(); loadErr == nil && state.DataPlaneVersion=="haproxy-tcp" { for _, service := range onlyProtocol(state.Services,domain.ProtocolTCP) { owned[virtualAddress(service)]=true } }
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
@@ -227,6 +264,7 @@ func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Se
 		protocol := strings.ToLower(fields[0])
 		endpoint := fields[4]
 		for _, service := range services {
+			if service.Protocol == domain.ProtocolTCP && strings.Contains(line, "haproxy") && owned[virtualAddress(service)] { continue }
 			if protocol == string(service.Protocol) && strings.HasSuffix(endpoint, ":"+strconv.Itoa(int(service.Port))) {
 				return fmt.Errorf("port conflict: %s %s:%d is occupied by %s", strings.ToUpper(protocol), service.Address, service.Port, strings.TrimSpace(line))
 			}
@@ -254,10 +292,11 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 	if err := r.configureKernel(ctx); err != nil {
 		return 0, err
 	}
+	if err := r.migrateLegacyTCP(ctx, &state); err != nil { return 0, err }
 	if err := r.applyFirewall(ctx, state.Services); err != nil {
 		return 0, fmt.Errorf("restore firewall: %w", err)
 	}
-	for _, service := range state.Services {
+	for _, service := range onlyProtocol(state.Services, domain.ProtocolUDP) {
 		if err := r.ensureService(ctx, service, true); err != nil {
 			return 0, fmt.Errorf("restore IPVS service: %w", err)
 		}
@@ -267,7 +306,10 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 			}
 		}
 	}
-	controls, err := r.reconcileTrafficControl(ctx, state.TrafficControls, state.Services)
+	if len(onlyProtocol(state.Services, domain.ProtocolTCP)) > 0 {
+		if err := r.applyHAProxy(ctx, state.Services); err != nil { return 0, fmt.Errorf("restore HAProxy: %w", err) }
+	}
+	controls, err := r.reconcileTrafficControl(ctx, state.TrafficControls, onlyProtocol(state.Services, domain.ProtocolUDP))
 	if err != nil {
 		return 0, fmt.Errorf("restore rate limits: %w", err)
 	}
@@ -313,6 +355,9 @@ func (r *Reconciler) Decommission(ctx context.Context) error {
 	}
 	if err := r.applyIPVS(ctx, old.Services, nil); err != nil {
 		return fmt.Errorf("remove IPVS services: %w", err)
+	}
+	if len(onlyProtocol(old.Services, domain.ProtocolTCP)) > 0 {
+		if err := r.applyHAProxy(ctx, nil); err != nil { return fmt.Errorf("remove HAProxy services: %w", err) }
 	}
 	if err := r.removeFirewall(ctx); err != nil {
 		return fmt.Errorf("remove EzhikLB firewall rules: %w", err)
@@ -407,7 +452,7 @@ func compileServices(config domain.ProfileConfig, vip string) []Service {
 			if listener.ListenAddress != "" && listener.ListenAddress != "0.0.0.0" {
 				address = listener.ListenAddress
 			}
-			service := Service{Protocol: protocol, Address: address, Port: listener.ListenPort, Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs, ListenerID: listener.ID, RateLimitEnabled: listener.RateLimitEnabled, RateLimitMbps: listener.RateLimitMbps}
+			service := Service{Protocol: protocol, Address: address, Port: listener.ListenPort, Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs, ListenerID: listener.ID, RateLimitEnabled: listener.RateLimitEnabled && protocol == domain.ProtocolUDP, RateLimitMbps: listener.RateLimitMbps}
 			for _, backend := range listener.Backends {
 				if backend.Enabled {
 					service.Destinations = append(service.Destinations, Destination{ID: backend.ID, Address: backend.Address, Port: backend.Port, Weight: backend.Weight})
@@ -425,10 +470,10 @@ func compileServices(config domain.ProfileConfig, vip string) []Service {
 
 func (r *Reconciler) applyIPVS(ctx context.Context, oldServices, desiredServices []Service) error {
 	oldMap, newMap := map[string]Service{}, map[string]Service{}
-	for _, service := range oldServices {
+	for _, service := range onlyProtocol(oldServices, domain.ProtocolUDP) {
 		oldMap[serviceKey(service)] = service
 	}
-	for _, service := range desiredServices {
+	for _, service := range onlyProtocol(desiredServices, domain.ProtocolUDP) {
 		newMap[serviceKey(service)] = service
 	}
 	for key, service := range newMap {
@@ -512,6 +557,7 @@ func (r *Reconciler) deleteService(ctx context.Context, service Service) error {
 }
 
 func (r *Reconciler) setDestinationWeight(ctx context.Context, service Service, destination Destination, weight int) error {
+	if service.Protocol == domain.ProtocolTCP { return setHAProxyServerWeight(service, destination, weight) }
 	_, err := r.runner.Run(ctx, "ipvsadm", []string{"-e", protocolFlag(service.Protocol), virtualAddress(service), "-r", realAddress(destination), "-m", "-w", strconv.Itoa(weight)}, "")
 	return err
 }
@@ -605,6 +651,7 @@ func (r *Reconciler) applyFirewall(ctx context.Context, services []Service) erro
 	filter := []string{"*filter", ":EZHIKLB-FORWARD - [0:0]", "-F EZHIKLB-FORWARD"}
 	nat := []string{"*nat", ":EZHIKLB-SNAT - [0:0]", "-F EZHIKLB-SNAT"}
 	for _, service := range services {
+		if service.Protocol != domain.ProtocolUDP { continue }
 		for _, destination := range service.Destinations {
 			proto := string(service.Protocol)
 			filter = append(filter,

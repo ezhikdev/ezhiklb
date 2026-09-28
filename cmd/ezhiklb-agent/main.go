@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 type client struct {
 	baseURL string
@@ -75,6 +75,7 @@ func main() {
 	var updateError string
 	var lastUpdateTarget string
 	var decommissioned bool
+	var restartAck int64
 	restoreNeedsProfile := applied > 0 && restoreErr == nil
 	if applied > 0 && restoreErr == nil {
 		restoredHealth := reconciler.RestoredHealthCheck()
@@ -85,7 +86,7 @@ func main() {
 	}
 
 	report := func() bool {
-		stats, err := agent.CollectIPVSStats(ctx, runner)
+		stats, err := agent.CollectDataPlaneStats(ctx, runner, reconciler.Services())
 		if err != nil {
 			logger.Warn("collect IPVS stats", "error", err)
 		}
@@ -98,7 +99,7 @@ func main() {
 			diagnostics = agent.CollectDiagnostics(ctx, runner, reconciler.Services(), reconciler.TrafficControls())
 			diagnosticsAt = time.Now()
 		}
-		if err := api.heartbeat(ctx, nodeID, applied, applyError, applyState, monitor.Results(), stats, metrics, diagnostics, updateState, updateError, decommissioned); err != nil {
+		if err := api.heartbeat(ctx, nodeID, applied, applyError, applyState, monitor.Results(), stats, metrics, diagnostics, updateState, updateError, restartAck, decommissioned); err != nil {
 			logger.Error("send heartbeat", "error", err)
 			return false
 		}
@@ -110,7 +111,7 @@ func main() {
 		if refreshingRestored {
 			knownRevision = 0
 		}
-		desired, changed, err := api.desired(ctx, nodeID, knownRevision, lastHealthProbe, lastUpdateTarget)
+		desired, changed, err := api.desired(ctx, nodeID, knownRevision, lastHealthProbe, lastUpdateTarget, restartAck)
 		if err != nil {
 			logger.Error("fetch desired state", "error", err)
 			return false
@@ -163,6 +164,18 @@ func main() {
 			decommissioned = true
 			logger.Info("node decommission completed")
 			return true
+		}
+		if desired.RestartNonce > restartAck {
+			restartAck = desired.RestartNonce
+			if !report() {
+				return true
+			}
+			logger.Info("restarting EzhikLB agent service by panel request", "nonce", restartAck)
+			if _, err := runner.Run(context.Background(), "systemctl", []string{"--no-block", "restart", "ezhiklb-agent.service"}, ""); err != nil {
+				logger.Error("restart EzhikLB agent service", "error", err)
+				return true
+			}
+			return false
 		}
 		probeRequested := desired.HealthProbe != lastHealthProbe
 		lastHealthProbe = desired.HealthProbe
@@ -248,7 +261,7 @@ func main() {
 	}
 }
 
-func (c *client) desired(ctx context.Context, nodeID string, knownRevision, knownHealthProbe int64, knownUpdate string) (domain.NodeDesiredState, bool, error) {
+func (c *client) desired(ctx context.Context, nodeID string, knownRevision, knownHealthProbe int64, knownUpdate string, knownRestart int64) (domain.NodeDesiredState, bool, error) {
 	var result domain.NodeDesiredState
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/v1/nodes/"+nodeID+"/desired", nil)
 	if err != nil {
@@ -256,7 +269,7 @@ func (c *client) desired(ctx context.Context, nodeID string, knownRevision, know
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	request.Header.Set("X-EzhikLB-Agent-Version", version)
-	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d-probe-%d-update-%s"`, knownRevision, knownHealthProbe, knownUpdate))
+	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d"`, knownRevision, knownHealthProbe, knownUpdate, knownRestart))
 	response, err := c.http.Do(request)
 	if err != nil {
 		return result, false, err
@@ -275,8 +288,8 @@ func (c *client) desired(ctx context.Context, nodeID string, knownRevision, know
 	return result, true, nil
 }
 
-func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError, applyState string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, diagnostics domain.NodeDiagnostics, updateState, updateError string, decommissioned bool) error {
-	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "apply_state": applyState, "health": health, "stats": stats, "metrics": metrics, "diagnostics": diagnostics, "update_state": updateState, "update_error": updateError, "decommissioned": decommissioned})
+func (c *client) heartbeat(ctx context.Context, nodeID string, applied int64, applyError, applyState string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, diagnostics domain.NodeDiagnostics, updateState, updateError string, restartAck int64, decommissioned bool) error {
+	body, _ := json.Marshal(map[string]any{"version": version, "applied_revision": applied, "apply_error": applyError, "apply_state": applyState, "health": health, "stats": stats, "metrics": metrics, "diagnostics": diagnostics, "update_state": updateState, "update_error": updateError, "restart_ack": restartAck, "decommissioned": decommissioned})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/agent/v1/nodes/"+nodeID+"/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return err

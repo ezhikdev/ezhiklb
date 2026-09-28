@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.1.0"
+EZHIKLB_VERSION="1.2.0"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -216,7 +216,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 packages=(ca-certificates curl openssl iproute2)
 if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
-  packages+=(ipvsadm iptables iproute2 iputils-ping conntrack)
+  packages+=(haproxy ipvsadm iptables iproute2 iputils-ping conntrack)
 fi
 apt-get install -y "${packages[@]}"
 
@@ -340,10 +340,34 @@ net.ipv4.conf.default.rp_filter = 2
 EOF
   modprobe ip_vs ip_vs_rr ip_vs_wrr nf_conntrack xt_ipvs
   sysctl --load /etc/sysctl.d/98-ezhiklb.conf >/dev/null
+  cat >/etc/systemd/system/ezhiklb-haproxy.service <<EOF
+[Unit]
+Description=EzhikLB managed HAProxy TCP data plane
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=${AGENT_DATA_DIR}/haproxy.cfg
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/haproxy -Ws -f ${AGENT_DATA_DIR}/haproxy.cfg -p /run/ezhiklb-haproxy/haproxy.pid
+ExecReload=/usr/sbin/haproxy -c -f ${AGENT_DATA_DIR}/haproxy.cfg
+ExecReload=/bin/kill -USR2 \$MAINPID
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=ezhiklb-haproxy
+RuntimeDirectoryMode=0750
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
   cat >/etc/systemd/system/ezhiklb-agent.service <<EOF
 [Unit]
 Description=EzhikLB node agent
-After=network-online.target ezhiklb.service
+After=network-online.target ezhiklb.service ezhiklb-haproxy.service
 Wants=network-online.target
 
 [Service]

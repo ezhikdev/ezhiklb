@@ -104,6 +104,14 @@ type Node struct {
 	UpdateTarget    string           `json:"update_target,omitempty"`
 	UpdateState     string           `json:"update_state,omitempty"`
 	UpdateError     string           `json:"update_error,omitempty"`
+	TrafficAccountingEnabled bool     `json:"traffic_accounting_enabled"`
+	TrafficRecordsEnabled    bool     `json:"traffic_records_enabled"`
+	TrafficAutoResetEnabled  bool     `json:"traffic_auto_reset_enabled"`
+	TrafficResetDay          int      `json:"traffic_reset_day"`
+	TrafficIncomingBytes     uint64   `json:"traffic_incoming_bytes"`
+	TrafficOutgoingBytes     uint64   `json:"traffic_outgoing_bytes"`
+	TrafficResetAt           *time.Time `json:"traffic_reset_at,omitempty"`
+	RestartNonce             int64    `json:"restart_nonce,omitempty"`
 	SortOrder       int              `json:"sort_order"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
@@ -111,6 +119,7 @@ type Node struct {
 
 type NodeDiagnostics struct {
 	IPVSAvailable           bool      `json:"ipvs_available"`
+	HAProxyAvailable        bool      `json:"haproxy_available"`
 	FirewallReady           bool      `json:"firewall_ready"`
 	ServiceCount            int       `json:"service_count"`
 	DestinationCount        int       `json:"destination_count"`
@@ -171,6 +180,7 @@ type NodeDesiredState struct {
 	ResetConnections bool          `json:"reset_connections,omitempty"`
 	Decommission     bool          `json:"decommission"`
 	UpdateVersion    string        `json:"update_version,omitempty"`
+	RestartNonce     int64         `json:"restart_nonce,omitempty"`
 	Config           ProfileConfig `json:"config"`
 }
 
@@ -197,6 +207,19 @@ type ServiceStat struct {
 	IncomingBytes   uint64    `json:"incoming_bytes"`
 	OutgoingBytes   uint64    `json:"outgoing_bytes"`
 	CollectedAt     time.Time `json:"collected_at"`
+}
+
+// TrafficTotal is a persistent accounting counter. Empty protocol/address
+// fields represent the node-wide counter; populated fields represent one
+// profile record (listener protocol and endpoint).
+type TrafficTotal struct {
+	NodeID         string    `json:"node_id"`
+	Protocol       Protocol  `json:"protocol,omitempty"`
+	ListenAddress  string    `json:"listen_address,omitempty"`
+	ListenPort     uint16    `json:"listen_port,omitempty"`
+	IncomingBytes  uint64    `json:"incoming_bytes"`
+	OutgoingBytes  uint64    `json:"outgoing_bytes"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (c ProfileConfig) Validate() error {
