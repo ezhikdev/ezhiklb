@@ -192,7 +192,7 @@ func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", false); err != nil {
+	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	nodes, err := s.ListNodes(ctx)
@@ -208,7 +208,7 @@ func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil {
+	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	nodes, err = s.ListNodes(ctx)
@@ -251,7 +251,7 @@ func TestPublishedResetIsOneShotAndRequiresCompatibleAgents(t *testing.T) {
 	if !desired.ResetConnections {
 		t.Fatal("published reset was not delivered to assigned node")
 	}
-	if err := s.Heartbeat(ctx, "local", "1.0.7", "", "applied", revision.Number, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", false); err != nil {
+	if err := s.Heartbeat(ctx, "local", "1.0.7", "", "applied", revision.Number, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	desired, err = s.DesiredState(ctx, "local")
