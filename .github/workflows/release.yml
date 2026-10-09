@@ -27,6 +27,13 @@ jobs:
         run: go mod tidy
       - name: Test backend and agent
         run: go test ./...
+      - name: Check installer and uninstall script syntax
+        run: |
+          for script in scripts/install.sh scripts/uninstall-node.sh scripts/uninstall-panel.sh; do
+            bash -n "$script"
+          done
+      - name: Check frontend types
+        run: npm --prefix web run typecheck
       - name: Build release bundle
         run: |
           npm --prefix web run build
@@ -35,10 +42,11 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/bin/ezhiklb-agent ./cmd/ezhiklb-agent
           cp -a web/dist/. dist/web/
           cp scripts/install.sh dist/install.sh
+          cp scripts/uninstall-node.sh scripts/uninstall-panel.sh dist/
           chmod +x dist/install.sh
           version="${GITHUB_REF_NAME#v}"
           cd dist
-          tar -czf "ezhiklb_${version}_linux_amd64.tar.gz" bin web install.sh
+          tar -czf "ezhiklb_${version}_linux_amd64.tar.gz" bin web install.sh uninstall-node.sh uninstall-panel.sh
           sha256sum "ezhiklb_${version}_linux_amd64.tar.gz" > "ezhiklb_${version}_linux_amd64.tar.gz.sha256"
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
