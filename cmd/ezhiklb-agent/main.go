@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "1.2.0"
+const version = "1.2.1"
 
 type client struct {
 	baseURL string
@@ -31,6 +31,17 @@ type client struct {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(version)
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--uninstall" {
+		if err := uninstallNode(logger); err != nil {
+			logger.Error("uninstall node", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	nodeID := env("EZHIKLB_NODE_ID", "local")
 	panelURL := strings.TrimRight(env("EZHIKLB_PANEL_URL", "http://127.0.0.1:8081"), "/")
 	if strings.HasPrefix(panelURL, "http://") && !isLoopbackURL(panelURL) && env("EZHIKLB_ALLOW_INSECURE", "0") != "1" {
@@ -61,6 +72,7 @@ func main() {
 		logger.Info("restored last applied state", "revision", applied)
 	}
 	var lastHealthProbe int64
+	appliedIngress := reconciler.RestoredIngressAddress()
 	var applyError string
 	applyState := "connecting"
 	if applied > 0 && restoreErr == nil {
@@ -111,7 +123,7 @@ func main() {
 		if refreshingRestored {
 			knownRevision = 0
 		}
-		desired, changed, err := api.desired(ctx, nodeID, knownRevision, lastHealthProbe, lastUpdateTarget, restartAck)
+		desired, changed, err := api.desired(ctx, nodeID, knownRevision, lastHealthProbe, lastUpdateTarget, restartAck, appliedIngress)
 		if err != nil {
 			logger.Error("fetch desired state", "error", err)
 			return false
@@ -179,7 +191,7 @@ func main() {
 		}
 		probeRequested := desired.HealthProbe != lastHealthProbe
 		lastHealthProbe = desired.HealthProbe
-		if desired.Revision != applied {
+		if desired.Revision != applied || desired.IngressAddress != appliedIngress {
 			logger.Info("applying desired revision", "revision", desired.Revision, "profile", desired.ProfileName)
 			applyState = "applying"
 			report()
@@ -190,6 +202,7 @@ func main() {
 				return true
 			} else {
 				applied = desired.Revision
+				appliedIngress = desired.IngressAddress
 				applyError = ""
 				applyState = "applied"
 				healthMu.Lock()
@@ -261,7 +274,7 @@ func main() {
 	}
 }
 
-func (c *client) desired(ctx context.Context, nodeID string, knownRevision, knownHealthProbe int64, knownUpdate string, knownRestart int64) (domain.NodeDesiredState, bool, error) {
+func (c *client) desired(ctx context.Context, nodeID string, knownRevision, knownHealthProbe int64, knownUpdate string, knownRestart int64, knownIngress string) (domain.NodeDesiredState, bool, error) {
 	var result domain.NodeDesiredState
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/v1/nodes/"+nodeID+"/desired", nil)
 	if err != nil {
@@ -269,7 +282,7 @@ func (c *client) desired(ctx context.Context, nodeID string, knownRevision, know
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	request.Header.Set("X-EzhikLB-Agent-Version", version)
-	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d"`, knownRevision, knownHealthProbe, knownUpdate, knownRestart))
+	request.Header.Set("If-None-Match", fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, knownRevision, knownHealthProbe, knownUpdate, knownRestart, knownIngress))
 	response, err := c.http.Do(request)
 	if err != nil {
 		return result, false, err

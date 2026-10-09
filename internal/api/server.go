@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,6 +100,7 @@ func (s *Server) PanelHandler() http.Handler {
 	// enrolled nodes use the dedicated agent listener.
 	mux.Handle("GET /agent/v1/nodes/{id}/desired", s.agent(http.HandlerFunc(s.desiredState)))
 	mux.Handle("POST /agent/v1/nodes/{id}/heartbeat", s.agent(http.HandlerFunc(s.heartbeat)))
+	mux.Handle("POST /agent/v1/nodes/{id}/decommission", s.agent(http.HandlerFunc(s.deleteNode)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -110,6 +112,7 @@ func (s *Server) AgentHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /agent/v1/nodes/{id}/desired", s.agent(http.HandlerFunc(s.desiredState)))
 	mux.Handle("POST /agent/v1/nodes/{id}/heartbeat", s.agent(http.HandlerFunc(s.heartbeat)))
+	mux.Handle("POST /agent/v1/nodes/{id}/decommission", s.agent(http.HandlerFunc(s.deleteNode)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -393,6 +396,10 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name and profile are required")
 		return
 	}
+	if !validNodeAddress(body.IngressAddress) {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Укажите IPv4 ноды: адрес должен быть назначен сетевому интерфейсу сервера")
+		return
+	}
 	node, token, err := s.store.CreateNode(r.Context(), body.Name, body.IngressAddress, body.ProfileID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
@@ -416,6 +423,10 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(body.Name) == "" {
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Node name is required")
+		return
+	}
+	if !validNodeAddress(strings.TrimSpace(body.IngressAddress)) {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "Укажите корректный IPv4 ноды")
 		return
 	}
 	err := s.store.UpdateNode(r.Context(), r.PathValue("id"), strings.TrimSpace(body.Name), strings.TrimSpace(body.IngressAddress))
@@ -531,6 +542,11 @@ func (s *Server) requestNodeRestart(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) { writeError(w,http.StatusNotFound,"not_found","Node not found") } else if err != nil { s.internalError(w,err) } else { writeJSON(w,http.StatusAccepted,map[string]int64{"restart_nonce":nonce}) }
 }
 
+func validNodeAddress(value string) bool {
+	address, err := netip.ParseAddr(value)
+	return err == nil && address.Is4() && address.IsGlobalUnicast() && address.As4()[0] != 0
+}
+
 func (s *Server) updateNodeTraffic(w http.ResponseWriter, r *http.Request) {
 	var body struct { Accounting bool `json:"accounting_enabled"`; Records bool `json:"records_enabled"`; AutoReset bool `json:"auto_reset_enabled"`; ResetDay int `json:"reset_day"` }
 	if err := decodeJSON(r,&body); err != nil { writeError(w,http.StatusBadRequest,"invalid_request",err.Error()); return }
@@ -633,7 +649,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до 1.1.0 перед применением ограничения скорости")
 		return
 	}
-	etag := fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d"`, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce)
+	etag := fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce, state.IngressAddress)
 	if state.Decommission {
 		etag = fmt.Sprintf(`"rev-%d-probe-%d-decommission"`, state.Revision, state.HealthProbe)
 	}
@@ -801,6 +817,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "1.2.0"
+const Version = "1.2.1"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

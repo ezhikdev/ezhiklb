@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -65,17 +66,24 @@ func haProxyWeight(service Service, weight int) int {
 func (r *Reconciler) haProxyConfigPath() string { return filepath.Join(filepath.Dir(r.statePath), "haproxy.cfg") }
 
 func (r *Reconciler) applyHAProxy(ctx context.Context, services []Service) error {
-	config := renderHAProxyConfig(services)
 	path := r.haProxyConfigPath()
+	if len(onlyProtocol(services, domain.ProtocolTCP)) == 0 {
+		if _, err := r.runner.Run(ctx, "systemctl", []string{"stop", "ezhiklb-haproxy.service"}, ""); err != nil {
+			return err
+		}
+		// HAProxy can reject a configuration with no listeners. Stop first
+		// and remove its managed config instead of validating an empty one.
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	config := renderHAProxyConfig(services)
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil { return err }
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(config), 0640); err != nil { return err }
 	if _, err := r.runner.Run(ctx, "haproxy", []string{"-c", "-f", tmp}, ""); err != nil { _ = os.Remove(tmp); return fmt.Errorf("validate HAProxy config: %w", err) }
 	if err := os.Rename(tmp, path); err != nil { return err }
-	if len(onlyProtocol(services, domain.ProtocolTCP)) == 0 {
-		_, err := r.runner.Run(ctx, "systemctl", []string{"stop", "ezhiklb-haproxy.service"}, "")
-		return err
-	}
 	if _, err := r.runner.Run(ctx, "systemctl", []string{"reload-or-restart", "ezhiklb-haproxy.service"}, ""); err != nil { return fmt.Errorf("reload HAProxy: %w", err) }
 	return nil
 }

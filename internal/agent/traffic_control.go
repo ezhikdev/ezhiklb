@@ -84,7 +84,13 @@ func (r *Reconciler) reconcileTrafficControl(ctx context.Context, old []TrafficC
 			continue
 		}
 		args := []string{"filter", "delete", "dev", control.Device, "egress", "protocol", "ip", "pref", strconv.Itoa(control.Preference), "handle", markSpec(control.Mark), "fw"}
-		_, _ = r.runner.Run(ctx, "tc", args, "")
+		if _, err := r.runner.Run(ctx, "tc", args, ""); err != nil {
+			show := []string{"filter", "show", "dev", control.Device, "egress", "protocol", "ip", "pref", strconv.Itoa(control.Preference)}
+			output, inspectErr := r.runner.Run(ctx, "tc", show, "")
+			if inspectErr != nil || strings.TrimSpace(output) != "" {
+				return desired, fmt.Errorf("remove limiter on %s (verification: %v): %w", control.Device, inspectErr, err)
+			}
+		}
 	}
 	return desired, nil
 }
@@ -226,17 +232,7 @@ func (r *Reconciler) applyTrafficMarks(ctx context.Context, services []Service, 
 }
 
 func (r *Reconciler) removeTrafficMarks(ctx context.Context) error {
-	prefix := []string{"-w", "5", "-t", "mangle"}
-	check := append(append([]string{}, prefix...), "-C", "POSTROUTING", "-j", "EZHIKLB-RATE")
-	if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
-		remove := append(append([]string{}, prefix...), "-D", "POSTROUTING", "-j", "EZHIKLB-RATE")
-		if _, err := r.runner.Run(ctx, "iptables", remove, ""); err != nil {
-			return err
-		}
-	}
-	_, _ = r.runner.Run(ctx, "iptables", append(append([]string{}, prefix...), "-F", "EZHIKLB-RATE"), "")
-	_, _ = r.runner.Run(ctx, "iptables", append(append([]string{}, prefix...), "-X", "EZHIKLB-RATE"), "")
-	return nil
+	return r.removeManagedChain(ctx, "mangle", "POSTROUTING", "EZHIKLB-RATE")
 }
 
 func trafficControlKey(control TrafficControl) string {

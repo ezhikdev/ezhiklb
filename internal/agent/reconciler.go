@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -62,6 +63,7 @@ type Destination struct {
 
 type AppliedState struct {
 	Revision        int64              `json:"revision"`
+	IngressAddress  string             `json:"ingress_address,omitempty"`
 	Services        []Service          `json:"services"`
 	HealthCheck     domain.HealthCheck `json:"health_check"`
 	TrafficControls []TrafficControl   `json:"traffic_controls,omitempty"`
@@ -173,7 +175,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 		}
 		return fmt.Errorf("apply rate limit: %w (previous state restored)", trafficErr)
 	}
-	return r.saveState(AppliedState{Revision: desired.Revision, Services: services, HealthCheck: desired.Config.HealthCheck, TrafficControls: controls, DataPlaneVersion: "haproxy-tcp"})
+	return r.saveState(AppliedState{Revision: desired.Revision, IngressAddress: desired.IngressAddress, Services: services, HealthCheck: desired.Config.HealthCheck, TrafficControls: controls, DataPlaneVersion: "haproxy-tcp"})
 }
 
 func (r *Reconciler) migrateLegacyTCP(ctx context.Context, state *AppliedState) error {
@@ -263,9 +265,14 @@ func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Se
 		}
 		protocol := strings.ToLower(fields[0])
 		endpoint := fields[4]
+		host, port, parseErr := net.SplitHostPort(endpoint)
+		if parseErr != nil {
+			continue
+		}
 		for _, service := range services {
 			if service.Protocol == domain.ProtocolTCP && strings.Contains(line, "haproxy") && owned[virtualAddress(service)] { continue }
-			if protocol == string(service.Protocol) && strings.HasSuffix(endpoint, ":"+strconv.Itoa(int(service.Port))) {
+			addressConflict := host == service.Address || host == "0.0.0.0" || host == "*" || host == "::"
+			if protocol == string(service.Protocol) && port == strconv.Itoa(int(service.Port)) && addressConflict {
 				return fmt.Errorf("port conflict: %s %s:%d is occupied by %s", strings.ToUpper(protocol), service.Address, service.Port, strings.TrimSpace(line))
 			}
 		}
@@ -320,6 +327,16 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 	return state.Revision, nil
 }
 
+func (r *Reconciler) RestoredIngressAddress() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, err := r.loadState()
+	if err != nil {
+		return ""
+	}
+	return state.IngressAddress
+}
+
 func (r *Reconciler) RestoredHealthCheck() domain.HealthCheck {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -353,8 +370,21 @@ func (r *Reconciler) Decommission(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := r.applyIPVS(ctx, old.Services, nil); err != nil {
-		return fmt.Errorf("remove IPVS services: %w", err)
+	for _, service := range onlyProtocol(old.Services, domain.ProtocolUDP) {
+		if err := r.deleteService(ctx, service); err != nil {
+			// A previous interrupted uninstall may already have removed this
+			// service. Only tolerate failure after verifying it is absent.
+			output, inspectErr := r.runner.Run(ctx, "ipvsadm", []string{"-Sn"}, "")
+			if inspectErr != nil {
+				return fmt.Errorf("verify IPVS cleanup: %w", inspectErr)
+			}
+			for _, line := range strings.Split(output, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 && fields[0] == "-A" && fields[1] == protocolFlag(service.Protocol) && fields[2] == virtualAddress(service) {
+					return fmt.Errorf("remove IPVS service %s: %w", virtualAddress(service), err)
+				}
+			}
+		}
 	}
 	if len(onlyProtocol(old.Services, domain.ProtocolTCP)) > 0 {
 		if err := r.applyHAProxy(ctx, nil); err != nil { return fmt.Errorf("remove HAProxy services: %w", err) }
@@ -370,21 +400,35 @@ func (r *Reconciler) Decommission(ctx context.Context) error {
 
 func (r *Reconciler) removeFirewall(ctx context.Context) error {
 	for _, rule := range []struct{ table, parent, child string }{{"filter", "FORWARD", "EZHIKLB-FORWARD"}, {"nat", "POSTROUTING", "EZHIKLB-SNAT"}} {
-		prefix := []string{"-w", "5"}
-		if rule.table != "filter" {
-			prefix = append(prefix, "-t", rule.table)
+		if err := r.removeManagedChain(ctx, rule.table, rule.parent, rule.child); err != nil {
+			return err
 		}
-		check := append(append([]string{}, prefix...), "-C", rule.parent, "-j", rule.child)
-		if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
-			remove := append(append([]string{}, prefix...), "-D", rule.parent, "-j", rule.child)
-			if _, err := r.runner.Run(ctx, "iptables", remove, ""); err != nil {
-				return err
+	}
+	return nil
+}
+
+func (r *Reconciler) removeManagedChain(ctx context.Context, table, parent, child string) error {
+	prefix := []string{"-w", "5", "-t", table}
+	check := append(append([]string{}, prefix...), "-C", parent, "-j", child)
+	if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
+		remove := append(append([]string{}, prefix...), "-D", parent, "-j", child)
+		if _, err := r.runner.Run(ctx, "iptables", remove, ""); err != nil {
+			return err
+		}
+	}
+	for _, action := range []string{"-F", "-X"} {
+		if _, err := r.runner.Run(ctx, "iptables", append(append([]string{}, prefix...), action, child), ""); err != nil {
+			output, inspectErr := r.runner.Run(ctx, "iptables", append(append([]string{}, prefix...), "-S"), "")
+			if inspectErr != nil {
+				return fmt.Errorf("verify firewall cleanup: %w", inspectErr)
 			}
+			for _, line := range strings.Split(output, "\n") {
+				if strings.TrimSpace(line) == "-N "+child {
+					return fmt.Errorf("remove firewall chain %s: %w", child, err)
+				}
+			}
+			return nil // Already removed by an earlier cleanup attempt.
 		}
-		flush := append(append([]string{}, prefix...), "-F", rule.child)
-		_, _ = r.runner.Run(ctx, "iptables", flush, "")
-		deleteChain := append(append([]string{}, prefix...), "-X", rule.child)
-		_, _ = r.runner.Run(ctx, "iptables", deleteChain, "")
 	}
 	return nil
 }

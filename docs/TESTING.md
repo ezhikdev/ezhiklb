@@ -201,3 +201,27 @@ Run these only on disposable test VPS nodes.
 60. Test manual reset, automatic reset days 1 and 31 (including a short month), and disabled states. The reset-day input must be absent while automatic reset is off, and the node-list total must be absent while node accounting is off.
 61. Use the panel service-restart button. Confirm the request is acknowledged before `ezhiklb-agent.service` restarts, the VPS is not rebooted, the action does not loop, and the active data plane remains available.
 62. On a 2-vCPU node with load1 near `0.82`, confirm the displayed CPU load is approximately `41%` and the detail text remains `load 0.82 / 2 vCPU`.
+
+## 1.2.1 acceptance checks — node IP and uninstall (disposable Linux VPS)
+
+63. Add a node with a second IPv4 assigned to its interface. Confirm empty,
+    malformed, wildcard and multicast addresses are rejected, and the selected
+    IP is displayed even if the agent connects from the server's primary IP.
+64. Assign a TCP+UDP profile with `0.0.0.0`, then change the node IP without
+    publishing the profile. Confirm HAProxy binds and IPVS services move to the
+    new IP, old owned services disappear, and unrelated same-port binds on
+    other addresses do not cause false conflicts. Explicit profile IPs stay.
+65. Try an IP absent from the interface. Confirm an apply error and unchanged
+    committed data plane; fix the IP and verify reconciliation recovers.
+66. Run `uninstall-node.sh` on a disposable enrolled node. Confirm the panel
+    receives the request followed by cleanup acknowledgement, deletes the node,
+    and all owned units/config/state/network rules disappear. Foreign IPVS,
+    firewall and HAProxy configuration must remain. Repeat with the panel
+    unavailable and with the node disabled; local cleanup must still complete.
+67. Simulate cleanup failure. Confirm no ownership files are deleted, retry
+    succeeds, and declining the confirmation changes nothing. Run the script
+    again after successful uninstall to check idempotent cleanup.
+68. Run `uninstall-panel.sh` on panel-only and panel+local-node installations.
+    Confirm local data plane is cleared before removal, remote nodes continue
+    forwarding, and backups remain. Check node-only uninstall preserves a
+    co-installed panel and its administrator credentials.

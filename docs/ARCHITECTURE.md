@@ -16,6 +16,20 @@ Node-specific values such as the ingress address are not part of a reusable
 profile. They live on the node and are merged with the selected profile by the
 agent configuration endpoint.
 
+Since 1.2.1 the panel requires a unicast IPv4 when creating or editing a node.
+The configured ingress takes precedence over the observed connection address
+in the UI. Desired-state ETags include the ingress address, and the agent
+reconciles when either the profile revision or ingress changes. Wildcard
+listeners use this address; explicitly addressed listeners retain their IP.
+
+Local uninstall uses `ezhiklb-agent --uninstall` after the script stops the
+agent service. For remote nodes, authenticated `POST
+/agent/v1/nodes/{id}/decommission` first marks the node as deleting through
+the existing store method. Only a successful cleanup heartbeat then removes
+the record. The normal deletion acknowledgement guard remains unchanged.
+Cleanup failures preserve on-disk ownership state; panel connection failures
+allow local uninstall with a warning to remove the record manually.
+
 ## Data plane
 
 Each enabled UDP listener becomes one IPVS virtual service. Backends keep IPVS

@@ -4,7 +4,7 @@
 
 **EzhikLB (Ezhik Load Balancer)** объединяет панель управления, переиспользуемые профили и удалённые ноды. TCP проксирует HAProxy Community, UDP остаётся на IPVS NAT в ядре Linux, а панель отвечает за конфигурацию, health-check, наблюдение и обновления.
 
-![Version](https://img.shields.io/badge/version-1.2.0-65c795?style=flat-square)
+![Version](https://img.shields.io/badge/version-1.2.1-65c795?style=flat-square)
 ![Protocols](https://img.shields.io/badge/protocols-TCP%20%2B%20UDP-e7e3dc?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Linux-9fa6b2?style=flat-square)
 
@@ -73,7 +73,7 @@ EzhikLB ориентирован именно на простое управле
 Одна команда запускает интерактивный установщик. Внутри можно выбрать панель, ноду или оба компонента:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=1.2.0 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=1.2.1 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
 Варианты установки:
@@ -109,11 +109,29 @@ ssh -L 8080:127.0.0.1:8080 root@IP_ПАНЕЛИ
 ## Подключение ноды
 
 1. Откройте **Ноды → Добавить ноду**.
-2. Укажите название, например `server-1`.
+2. Укажите название, например `server-1`, и входящий IPv4 ноды. Если у сервера несколько IP, выберите нужный адрес; он должен быть назначен сетевому интерфейсу.
 3. Проверьте публичный адрес API панели.
 4. Скопируйте сгенерированную команду и выполните её на VPS ноды.
 
-Панель автоматически покажет подключение, IPv4, uptime, текущую нагрузку и состояние применения профиля. Один профиль можно назначить нескольким нодам.
+Панель покажет подключение, выбранный IPv4, uptime, нагрузку и состояние применения профиля. Один профиль можно назначить нескольким нодам.
+
+Чтобы сменить IP, откройте **Ноды → Изменить → IPv4 ноды**. Агент 1.2.1+ пересоздаст TCP/HAProxy и UDP/IPVS-конфигурацию без публикации новой версии профиля. В записях профиля используйте `0.0.0.0` для подстановки IP ноды; явно заданные IP остаются неизменными. Агент проверяет наличие нового адреса на интерфейсе перед применением. Адрес подключения агента к панели отображается отдельно.
+
+## Удаление компонентов
+
+После полного запуска установщика 1.2.1 скрипты доступны на сервере:
+
+```bash
+# На сервере ноды: очистить маршруты, удалить агент и его файлы
+sudo bash /opt/ezhiklb/uninstall-node.sh
+
+# На сервере панели: удалить панель, базу и локальную ноду (если установлена)
+sudo bash /opt/ezhiklb/uninstall-panel.sh
+```
+
+Скрипты спрашивают подтверждение; `--yes` позволяет запуск без диалога. Они также включены в архив релиза рядом с `install.sh`. Удаление ноды требует агента 1.2.1+: сначала остановка службы, затем очистка только принадлежащих EzhikLB IPVS/HAProxy/firewall/tc правил, затем удаление файлов. Ошибка очистки прерывает удаление и сохраняет файлы для повторного запуска.
+
+При доступной панели удалённая нода запрашивает штатное удаление и подтверждает очистку. При недоступной панели, отключённой ноде или отозванном токене локальные файлы удаляются, а запись нужно удалить в панели вручную (при необходимости — принудительно после запроса удаления). Удаление панели не удаляет её удалённые ноды: применённые конфигурации продолжают работать без управления. Общие системные пакеты, чужие сетевые правила и резервные копии `/var/backups/ezhiklb` сохраняются. Скрипты рассчитаны на стандартные пути установщика.
 
 ## Создание маршрута
 

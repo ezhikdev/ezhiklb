@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.2.0"
+EZHIKLB_VERSION="1.2.1"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -211,6 +211,10 @@ require_artifacts() {
 }
 require_artifacts
 
+for component in node panel; do
+  [[ -f "${BUNDLE_DIR}/uninstall-${component}.sh" ]] || die "missing uninstall-${component}.sh; use a complete release bundle"
+done
+
 log "Installing system dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -242,6 +246,8 @@ install -d -m 0750 -o root -g root "$AGENT_DATA_DIR"
 # The control plane runs as the unprivileged ezhiklb user. Every directory in
 # its executable path must therefore be traversable, while remaining root-owned.
 install -d -m 0755 -o root -g root "$PREFIX" "$PREFIX/bin"
+install -m 0755 "${BUNDLE_DIR}/uninstall-node.sh" "${PREFIX}/uninstall-node.sh"
+install -m 0755 "${BUNDLE_DIR}/uninstall-panel.sh" "${PREFIX}/uninstall-panel.sh"
 
 legacy_config="/etc/ezhik-udp/ezhik-udp.conf"
 if [[ -f "$legacy_config" ]]; then
