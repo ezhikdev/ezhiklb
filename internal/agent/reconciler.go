@@ -227,9 +227,8 @@ func (r *Reconciler) resetConnectionState(ctx context.Context, oldServices, desi
 		}
 		return fmt.Errorf("recreate managed services: %w (previous state restored)", err)
 	}
-	if len(onlyProtocol(oldServices, domain.ProtocolTCP))+len(onlyProtocol(desiredServices, domain.ProtocolTCP)) > 0 {
-		if err := r.applyHAProxy(ctx, desiredServices); err != nil { return fmt.Errorf("reload HAProxy connection state: %w", err) }
-	}
+	// Reconcile applies HAProxy once after this reset, including rollback on
+	// failure. Reloading here too creates a redundant draining worker generation.
 	return nil
 }
 

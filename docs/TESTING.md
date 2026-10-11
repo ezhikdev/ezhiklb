@@ -1,5 +1,13 @@
 # Test-node checklist
 
+## 1.2.2 CPU optimization checks
+
+See [the CPU analysis and node verification procedure](OPTIMIZATION-v1.2.2.md).
+The release workflow installs HAProxy before running the Go tests so generated
+configs are checked with the actual Linux binary. Measure before/after CPU at
+the same traffic rate, packet rate and connection count; test TCP payload
+integrity, affinity, health transitions, UDP limits and single-reload resets.
+
 The workspace intentionally does not build or run EzhikLB. Push the repository
 to GitHub and let the release workflow create the Linux bundle.
 
