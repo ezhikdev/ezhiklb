@@ -25,6 +25,8 @@ jobs:
         run: npm install
       - name: Resolve Go dependencies
         run: go mod tidy
+      - name: Install HAProxy for generated configuration checks
+        run: sudo apt-get update && sudo apt-get install -y haproxy
       - name: Test backend and agent
         run: go test ./...
       - name: Check installer and uninstall script syntax
