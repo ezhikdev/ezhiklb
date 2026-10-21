@@ -17,3 +17,8 @@ ezhiklb-credentials.txt
 .vscode/
 .DS_Store
 Thumbs.db
+
+
+# Local test-server credentials (never commit)
+TEST-SERVER.txt
+*.tsbuildinfo
