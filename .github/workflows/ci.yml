@@ -22,9 +22,18 @@ jobs:
           node-version: 22
       - name: Install web dependencies
         working-directory: web
-        run: npm install
+        run: npm ci
+      - name: Install HAProxy for generated configuration checks
+        run: sudo apt-get update && sudo apt-get install -y haproxy
+      - name: Vet Go
+        run: go vet ./...
       - name: Test Go
         run: go test ./...
+      - name: Check installer and uninstall script syntax
+        run: |
+          for script in scripts/install.sh scripts/uninstall-node.sh scripts/uninstall-panel.sh; do
+            bash -n "$script"
+          done
       - name: Build web
         working-directory: web
         run: npm run build
