@@ -86,6 +86,8 @@ func TestRenderHiddenHAProxyConfig(t *testing.T) {
 		"use_backend be_wild if { req.ssl_sni -m end -i .example.org }",
 		"use_backend be_ezhiklb.reject-tls if { req.ssl_hello_type 1 }", "default_backend be_ezhiklb.reject-plain",
 		"ssl crt /var/lib/ezhiklb-agent/sni-reject.pem strict-sni", "http-request deny deny_status 400",
+		"http-request redirect scheme https code 301 if { hdr(host),field(1,:) -i vpn.example.org }",
+		"http-request redirect scheme https code 301 if { hdr(host),field(1,:) -m end -i .example.org }",
 		"backend be_exact\n  balance roundrobin", "server srv_e1 192.0.2.10:9443 weight 2", "stick on src",
 	} {
 		if !strings.Contains(config, expected) {

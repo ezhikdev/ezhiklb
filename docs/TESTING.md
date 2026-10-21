@@ -286,3 +286,10 @@ checks 69–80; repeat them on a disposable VPS before production rollout.
 82. UI: check both themes and the phone layout (menu drawer), the hidden-profile
     checkbox at the top of the profile form, SNI validation and the publish
     button staying disabled while a record has no SNI.
+
+## 2.0.1 acceptance checks — HTTP to HTTPS redirect in hidden profiles
+
+83. `curl -sI http://NODE/path -H 'Host: vpn.example.com'` (exact record) and
+    `-H 'Host: x.example.org:80'` (wildcard record, port in Host) return `301`
+    with `Location: https://<host>/path`; an unknown or missing Host returns
+    `400`; TLS SNI routing on 80/443 is unchanged.

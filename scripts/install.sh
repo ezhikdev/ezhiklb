@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="2.0.0"
+EZHIKLB_VERSION="2.0.1"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"

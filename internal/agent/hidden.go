@@ -103,8 +103,22 @@ func renderSNIFrontend(b *strings.Builder, services []Service, rejectCertificate
 	// name is never requested, and no certificate content is ever sent.
 	fmt.Fprintf(b, "frontend fe_ezhiklb.reject-tls\n  mode http\n  no log\n  bind %s ssl crt %s strict-sni\n  timeout http-request 5s\n  http-request deny deny_status 421\n\n", sniRejectTLSSocket, rejectCertificate)
 	// http-ignore-probes closes silent connections without a 408 response,
-	// so a bare TCP probe learns nothing beyond "port open".
-	fmt.Fprintf(b, "frontend fe_ezhiklb.reject-plain\n  mode http\n  no log\n  option http-ignore-probes\n  bind %s\n  timeout http-request 5s\n  http-request deny deny_status 400\n\n", sniRejectHTTPSocket)
+	// so a bare TCP probe learns nothing beyond "port open". A browser opening
+	// http:// for a record's domain is sent to https:// (same host and path);
+	// any other Host still gets 400.
+	fmt.Fprintf(b, "frontend fe_ezhiklb.reject-plain\n  mode http\n  no log\n  option http-ignore-probes\n  bind %s\n  timeout http-request 5s\n", sniRejectHTTPSocket)
+	for _, service := range sniRoutingOrder(services) {
+		fmt.Fprintf(b, "  http-request redirect scheme https code 301 if %s\n", hostCondition(service.SNI))
+	}
+	b.WriteString("  http-request deny deny_status 400\n\n")
+}
+
+// hostCondition matches the HTTP Host header (without a port) like sniCondition.
+func hostCondition(name string) string {
+	if suffix, wildcard := strings.CutPrefix(name, "*."); wildcard {
+		return "{ hdr(host),field(1,:) -m end -i ." + suffix + " }"
+	}
+	return "{ hdr(host),field(1,:) -i " + name + " }"
 }
 
 func (r *Reconciler) sniRejectCertificatePath() string {

@@ -4,7 +4,7 @@
 
 **EzhikLB (Ezhik Load Balancer)** объединяет панель управления, переиспользуемые профили и удалённые ноды. TCP проксирует HAProxy Community, UDP остаётся на IPVS NAT в ядре Linux, а панель отвечает за конфигурацию, health-check, наблюдение и обновления.
 
-![Version](https://img.shields.io/badge/version-2.0.0-65c795?style=flat-square)
+![Version](https://img.shields.io/badge/version-2.0.1-65c795?style=flat-square)
 ![Protocols](https://img.shields.io/badge/protocols-TCP%20%2B%20UDP-e7e3dc?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Linux-9fa6b2?style=flat-square)
 
@@ -75,7 +75,7 @@ EzhikLB ориентирован именно на простое управле
 Одна команда запускает интерактивный установщик. Внутри можно выбрать панель, ноду или оба компонента:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=2.0.0 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=2.0.1 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
 Варианты установки:
@@ -173,7 +173,9 @@ ICMP health-check проверяет доступность IP-адреса, н�
 - распределяет совпавшие подключения по выходам записи прежней логикой: веса,
   `wrr`/`rr`, Affinity, health-check;
 - отвечает ошибкой, если SNI нет или он не совпал ни с одной записью: TLS-клиент
-  получает TLS alert, обычный HTTP — `400 Bad Request`. TCP-соединение при этом
+  получает TLS alert, обычный HTTP — `400 Bad Request`. Обычный HTTP-запрос
+  к домену одной из записей (например, `http://vpn.example.com/` в браузере)
+  получает `301` на `https://` с тем же хостом и путём. TCP-соединение при этом
   устанавливается, поэтому проверка доступности портов 80/443 работает;
 - закрывает все остальные входящие порты ноды цепочкой `EZHIKLB-INPUT` (IPv4 и
   IPv6). Открытыми остаются `22`, `80`, `443`, фактические порты SSH-сервера и
