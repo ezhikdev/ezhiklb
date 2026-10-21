@@ -1,4 +1,4 @@
-import { ArrowRight, Copy, GripVertical, Pencil, Plus, Server, Trash2 } from "lucide-react"
+import { ArrowRight, Copy, Globe, GripVertical, Lock, Pencil, Plus, Server, Trash2 } from "lucide-react"
 import { useMemo, useState } from "react"
 import type { Backend, BackendHealth, Listener, ProfileConfig, Protocol } from "../types"
 import { Badge, Button, Card, ConfirmDialog, Dialog, Field, Input, SelectMenu, Switch } from "./ui"
@@ -11,20 +11,27 @@ const makeID = (prefix: string) => {
   return `${prefix}_${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`
 }
 
+/** TCP ports every hidden-profile record is served on (domain.HiddenPorts). */
+export const hiddenPorts = [80, 443] as const
+
 const newBackend = (): Backend => ({ id: makeID("bck"), address: "", port: 8080, weight: 1, enabled: true })
-const newListener = (): Listener => ({
-  id: makeID("lst"), name: "Новая запись", enabled: true, listen_address: "0.0.0.0", listen_port: 8000,
-  protocols: ["udp"], scheduler: "wrr", affinity_seconds: 0, rate_limit_enabled: false, rate_limit_mbps: 0, backends: [newBackend()],
-})
+const newListener = (hidden: boolean): Listener => hidden
+  ? { id: makeID("lst"), name: "Новая запись", enabled: true, listen_address: "0.0.0.0", listen_port: 443, protocols: ["tcp"], scheduler: "wrr", affinity_seconds: 0, rate_limit_enabled: false, rate_limit_mbps: 0, sni: "", backends: [{ ...newBackend(), port: 443 }] }
+  : { id: makeID("lst"), name: "Новая запись", enabled: true, listen_address: "0.0.0.0", listen_port: 8000, protocols: ["udp"], scheduler: "wrr", affinity_seconds: 0, rate_limit_enabled: false, rate_limit_mbps: 0, backends: [newBackend()] }
+
+/** Brings records to the fixed socket of a hidden profile; SNI values are kept. */
+export function toHiddenListener(listener: Listener): Listener {
+  return { ...listener, listen_address: "0.0.0.0", listen_port: 443, protocols: ["tcp"], rate_limit_enabled: false, rate_limit_mbps: 0 }
+}
 
 type ListenerErrors = Record<string, string>
 
 const affinityPresets = [
   { value: 0, label: "Выключено", description: "Новые потоки могут попадать на разные backend" },
-  { value: 900, label: "15 минут", description: "Короткие UDP-сессии" },
-  { value: 1800, label: "30 минут", description: "Обычные UDP-сессии" },
+  { value: 900, label: "15 минут", description: "Короткие сессии" },
+  { value: 1800, label: "30 минут", description: "Обычные сессии" },
   { value: 3600, label: "1 час", description: "Долгие соединения" },
-  { value: 10800, label: "3 часа", description: "VPN и stateful UDP" },
+  { value: 10800, label: "3 часа", description: "VPN и stateful-протоколы" },
   { value: 18000, label: "5 часов", description: "Долгоживущие VPN-сессии" },
   { value: 86400, label: "24 часа", description: "Строго постоянный backend" },
 ] as const
@@ -34,14 +41,33 @@ const isIPv4 = (value: string) => {
   return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
 }
 
-function validateListener(listener: Listener, others: Listener[]): ListenerErrors {
+export const normalizeSNI = (value: string) => value.trim().toLowerCase().replace(/\.$/, "")
+
+/** Mirrors domain.ValidSNI: a host name or one leading "*." wildcard label. */
+export function isValidSNI(value: string) {
+  const name = normalizeSNI(value)
+  if (!name || name.length > 253) return false
+  const labels = name.replace(/^\*\./, "").split(".")
+  if (labels.length < 2 || !labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return false
+  return !/^\d+$/.test(labels[labels.length - 1])
+}
+
+function validateListener(listener: Listener, others: Listener[], hidden: boolean): ListenerErrors {
   const errors: ListenerErrors = {}
   if (!listener.name.trim()) errors.name = "Укажите название записи"
-  if (!isIPv4(listener.listen_address)) errors.listen_address = "Укажите корректный IPv4-адрес"
-  if (!Number.isInteger(listener.listen_port) || listener.listen_port < 1 || listener.listen_port > 65535) errors.listen_port = "Порт должен быть от 1 до 65535"
-  if (listener.protocols.length === 0) errors.protocols = "Выберите TCP, UDP или оба протокола"
+  if (hidden) {
+    const sni = normalizeSNI(listener.sni ?? "")
+    if (!isValidSNI(sni)) errors.sni = "Укажите домен, например vpn.example.com или *.example.com"
+    else if (others.some((candidate) => normalizeSNI(candidate.sni ?? "") === sni)) errors.sni = "Этот SNI уже используется другой записью"
+  } else {
+    if (!isIPv4(listener.listen_address)) errors.listen_address = "Укажите корректный IPv4-адрес"
+    if (!Number.isInteger(listener.listen_port) || listener.listen_port < 1 || listener.listen_port > 65535) errors.listen_port = "Порт должен быть от 1 до 65535"
+    if (listener.protocols.length === 0) errors.protocols = "Выберите TCP, UDP или оба протокола"
+    if (listener.rate_limit_enabled && (!Number.isInteger(listener.rate_limit_mbps) || (listener.rate_limit_mbps ?? 0) < 1 || (listener.rate_limit_mbps ?? 0) > 100000)) errors.rate_limit_mbps = "Лимит должен быть от 1 до 100000 Мбит/с"
+    const conflicts = others.some((candidate) => (candidate.listen_address === listener.listen_address || candidate.listen_address === "0.0.0.0" || listener.listen_address === "0.0.0.0") && candidate.listen_port === listener.listen_port && candidate.protocols.some((protocol) => listener.protocols.includes(protocol)))
+    if (conflicts) errors.listen_port = "Этот адрес, порт и протокол уже используются другой записью"
+  }
   if (listener.affinity_seconds < 0 || listener.affinity_seconds > 86400) errors.affinity_seconds = "Допустимо значение от 0 до 86400"
-  if (listener.rate_limit_enabled && (!Number.isInteger(listener.rate_limit_mbps) || (listener.rate_limit_mbps ?? 0) < 1 || (listener.rate_limit_mbps ?? 0) > 100000)) errors.rate_limit_mbps = "Лимит должен быть от 1 до 100000 Мбит/с"
   if (listener.backends.length === 0) errors.backends = "Добавьте хотя бы один выход"
   listener.backends.forEach((backend, index) => {
     if (!isIPv4(backend.address)) errors[`backend.${index}.address`] = "Некорректный IPv4"
@@ -50,40 +76,53 @@ function validateListener(listener: Listener, others: Listener[]): ListenerError
     if (listener.backends.some((candidate, candidateIndex) => candidateIndex < index && candidate.address === backend.address && candidate.port === backend.port)) errors[`backend.${index}.address`] = "Такой выход уже добавлен"
   })
   if (listener.enabled && !listener.backends.some((backend) => backend.enabled)) errors.backends = "У включённой записи должен быть включён хотя бы один выход"
-  const conflicts = others.some((candidate) => (candidate.listen_address === listener.listen_address || candidate.listen_address === "0.0.0.0" || listener.listen_address === "0.0.0.0") && candidate.listen_port === listener.listen_port && candidate.protocols.some((protocol) => listener.protocols.includes(protocol)))
-  if (conflicts) errors.listen_port = "Этот адрес, порт и протокол уже используются другой записью"
   return errors
 }
 
-export function ProfileEditor({ initial, health, nodeAddresses, onChange }: { initial: ProfileConfig; health?: BackendHealth[]; nodeAddresses?: string[]; onChange: (config: ProfileConfig) => void }) {
-  const [config, setConfig] = useState<ProfileConfig>(() => structuredClone(initial))
+/** Records of a hidden profile that still need a valid, unique SNI. */
+export function hiddenProblems(config: ProfileConfig): string[] {
+  if (!config.hidden) return []
+  const seen = new Map<string, string>()
+  const problems: string[] = []
+  for (const listener of config.listeners) {
+    const sni = normalizeSNI(listener.sni ?? "")
+    if (!isValidSNI(sni)) problems.push(`«${listener.name}»: укажите SNI`)
+    else if (seen.has(sni)) problems.push(`«${listener.name}»: SNI ${sni} уже у «${seen.get(sni)}»`)
+    else seen.set(sni, listener.name)
+  }
+  return problems
+}
+
+export function ProfileEditor({ value, health, nodeAddresses, onChange }: { value: ProfileConfig; health?: BackendHealth[]; nodeAddresses?: string[]; onChange: (config: ProfileConfig) => void }) {
+  const config = value
+  const hidden = Boolean(config.hidden)
   const [editing, setEditing] = useState<{ listener: Listener; index: number | null } | null>(null)
   const [removing, setRemoving] = useState<number | null>(null)
-  const update = (next: ProfileConfig) => { setConfig(next); onChange(next) }
-  const patchHealth = (values: Partial<ProfileConfig["health_check"]>) => update({ ...config, health_check: { ...config.health_check, ...values } })
+  const patchHealth = (values: Partial<ProfileConfig["health_check"]>) => onChange({ ...config, health_check: { ...config.health_check, ...values } })
   const totalBackends = useMemo(() => config.listeners.reduce((sum, listener) => sum + listener.backends.length, 0), [config.listeners])
 
   const saveListener = (listener: Listener) => {
     const listeners = [...config.listeners]
     if (editing?.index == null) listeners.push(listener)
     else listeners[editing.index] = listener
-    update({ ...config, listeners })
+    onChange({ ...config, listeners })
     setEditing(null)
   }
   const cloneListener = (listener: Listener) => {
     const clone = structuredClone(listener)
     clone.id = makeID("lst")
     clone.name = `${listener.name} — копия`
-    clone.listen_port = Math.min(65535, listener.listen_port + 1)
+    if (hidden) clone.sni = ""
+    else clone.listen_port = Math.min(65535, listener.listen_port + 1)
     clone.backends = clone.backends.map((backend) => ({ ...backend, id: makeID("bck") }))
     setEditing({ listener: clone, index: null })
   }
-  const removeListener = (index: number) => { update({ ...config, listeners: config.listeners.filter((_, item) => item !== index) }); setRemoving(null) }
+  const removeListener = (index: number) => { onChange({ ...config, listeners: config.listeners.filter((_, item) => item !== index) }); setRemoving(null) }
 
   return <div className="editor-stack">
     <Card className="settings-card">
       <div className="settings-card__heading">
-        <div><h3>ICMP health-check</h3><p>Проверяет доступность хостов и автоматически управляет весом.</p></div>
+        <div><h3>ICMP health-check</h3><p>Проверяет доступность хостов и автоматически снимает вес с недоступных выходов.</p></div>
         <Switch label="Включить health-check" checked={config.health_check.enabled} onChange={(enabled) => patchHealth({ enabled })} />
       </div>
       <div className="form-grid form-grid--four">
@@ -95,32 +134,32 @@ export function ProfileEditor({ initial, health, nodeAddresses, onChange }: { in
     </Card>
 
     <div className="section-heading">
-      <div><p className="eyebrow">Маршрутизация</p><h3>{config.listeners.length} записей · {totalBackends} выходов</h3></div>
-      <Button variant="secondary" onClick={() => setEditing({ listener: newListener(), index: null })}><Plus data-icon="inline-start" />Добавить запись</Button>
+      <div><p className="eyebrow">{hidden ? "Маршрутизация по SNI · TCP 80 + 443" : "Маршрутизация"}</p><h3>{config.listeners.length} записей · {totalBackends} выходов</h3></div>
+      <Button variant="secondary" onClick={() => setEditing({ listener: newListener(hidden), index: null })}><Plus data-icon="inline-start" />Добавить запись</Button>
     </div>
 
     {config.listeners.length === 0
-      ? <div className="inline-empty"><Server /><div><strong>Записей пока нет</strong><span>Добавьте входной порт и хотя бы один backend.</span></div></div>
-      : <RuleList listeners={config.listeners}
-          onToggle={(index, enabled) => update({ ...config, listeners: config.listeners.map((item, itemIndex) => itemIndex === index ? { ...item, enabled } : item) })}
+      ? <div className="inline-empty"><Server /><div><strong>Записей пока нет</strong><span>{hidden ? "Добавьте домен (SNI) и хотя бы один выход." : "Добавьте входной порт и хотя бы один backend."}</span></div></div>
+      : <RuleList listeners={config.listeners} hidden={hidden}
+          onToggle={(index, enabled) => onChange({ ...config, listeners: config.listeners.map((item, itemIndex) => itemIndex === index ? { ...item, enabled } : item) })}
           onEdit={(index) => setEditing({ listener: structuredClone(config.listeners[index]), index })}
           onClone={(index) => cloneListener(config.listeners[index])}
           onRemove={(index) => setRemoving(index)}
-          onReorder={(next) => update({ ...config, listeners: next })} />}
+          onReorder={(next) => onChange({ ...config, listeners: next })} />}
 
-    {editing && <ListenerDialog initial={editing.listener} others={config.listeners.filter((_, index) => index !== editing.index)} health={health ?? []} nodeAddresses={nodeAddresses ?? []} onSave={saveListener} onClose={() => setEditing(null)} />}
+    {editing && <ListenerDialog initial={editing.listener} hidden={hidden} others={config.listeners.filter((_, index) => index !== editing.index)} health={health ?? []} nodeAddresses={nodeAddresses ?? []} onSave={saveListener} onClose={() => setEditing(null)} />}
     {removing != null && <ConfirmDialog title="Удалить запись?" description={`Запись «${config.listeners[removing].name}» будет удалена из профиля.`} confirmLabel="Удалить запись" danger onCancel={() => setRemoving(null)} onConfirm={() => removeListener(removing)} />}
   </div>
 }
 
-function RuleList({ listeners, onToggle, onEdit, onClone, onRemove, onReorder }: { listeners: Listener[]; onToggle: (index: number, enabled: boolean) => void; onEdit: (index: number) => void; onClone: (index: number) => void; onRemove: (index: number) => void; onReorder: (next: Listener[]) => void }) {
+function RuleList({ listeners, hidden, onToggle, onEdit, onClone, onRemove, onReorder }: { listeners: Listener[]; hidden: boolean; onToggle: (index: number, enabled: boolean) => void; onEdit: (index: number) => void; onClone: (index: number) => void; onRemove: (index: number) => void; onReorder: (next: Listener[]) => void }) {
   const { activeID, itemRef, handleProps } = useDragReorder({ items: listeners, getID: (listener) => listener.id, axis: "vertical", onReorder })
 
   return <div className="rule-list">{listeners.map((listener, index) => (
     <div key={listener.id} data-row-id={listener.id}
       ref={itemRef(listener.id)}
       className={`rule-row-wrap ${activeID === listener.id ? "sortable-placeholder" : ""}`}>
-      <RuleRow listener={listener}
+      <RuleRow listener={listener} hidden={hidden}
         onToggle={(enabled) => onToggle(index, enabled)}
         onEdit={() => onEdit(index)}
         onClone={() => onClone(index)}
@@ -130,16 +169,17 @@ function RuleList({ listeners, onToggle, onEdit, onClone, onRemove, onReorder }:
   ))}</div>
 }
 
-function RuleRow({ listener, onToggle, onEdit, onClone, onRemove, dragHandleProps }: { listener: Listener; onToggle: (enabled: boolean) => void; onEdit: () => void; onClone: () => void; onRemove: () => void; dragHandleProps: React.HTMLAttributes<HTMLButtonElement> }) {
+function RuleRow({ listener, hidden, onToggle, onEdit, onClone, onRemove, dragHandleProps }: { listener: Listener; hidden: boolean; onToggle: (enabled: boolean) => void; onEdit: () => void; onClone: () => void; onRemove: () => void; dragHandleProps: React.HTMLAttributes<HTMLButtonElement> }) {
   const enabledBackends = listener.backends.filter((backend) => backend.enabled)
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
-  return <Card className={`rule-row ${listener.enabled ? "" : "rule-row--disabled"}`}>
+  const sni = normalizeSNI(listener.sni ?? "")
+  return <Card className={`rule-row ${listener.enabled ? "" : "rule-row--disabled"} ${hidden && !isValidSNI(sni) ? "rule-row--invalid" : ""}`}>
     <button type="button" className="rule-row__handle" aria-label={`Изменить порядок: ${listener.name}`} title="Перетащите, чтобы изменить порядок в списке"
       {...dragHandleProps}><GripVertical /></button>
     <div className="rule-row__toggle"><Switch label={`${listener.enabled ? "Выключить" : "Включить"} ${listener.name}`} checked={listener.enabled} onChange={onToggle} /></div>
     <button type="button" className="rule-row__main" onClick={onEdit}>
-      <div className="rule-row__name"><strong>{listener.name}</strong><span>{listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}{listener.rate_limit_enabled ? ` · ≤ ${listener.rate_limit_mbps} Мбит/с` : ""}</span></div>
-      <div className="rule-route mono"><span>{listener.listen_address}:{listener.listen_port}</span><ArrowRight /><span>{enabledBackends.length} {enabledBackends.length === 1 ? "выход" : "выхода"}</span></div>
+      <div className="rule-row__name"><strong>{listener.name}</strong><span>{hidden ? `SNI · TCP ${hiddenPorts.join(" + ")}` : listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}{!hidden && listener.rate_limit_enabled ? ` · ≤ ${listener.rate_limit_mbps} Мбит/с` : ""}</span></div>
+      <div className="rule-route mono">{hidden ? <span className={`sni-chip ${isValidSNI(sni) ? "" : "sni-chip--missing"}`}><Globe />{isValidSNI(sni) ? sni : "SNI не указан"}</span> : <span>{listener.listen_address}:{listener.listen_port}</span>}<ArrowRight /><span>{enabledBackends.length} {enabledBackends.length === 1 ? "выход" : "выхода"}</span></div>
       <div className="rule-targets">{enabledBackends.slice(0, 2).map((backend) => <span key={backend.id}>{backend.address}:{backend.port} · {totalWeight ? Math.round(backend.weight / totalWeight * 100) : 0}%</span>)}{enabledBackends.length > 2 && <span>+ ещё {enabledBackends.length - 2}</span>}</div>
     </button>
     <div className="rule-row__actions">
@@ -150,48 +190,57 @@ function RuleRow({ listener, onToggle, onEdit, onClone, onRemove, dragHandleProp
   </Card>
 }
 
-function ListenerDialog({ initial, others, health, nodeAddresses, onSave, onClose }: { initial: Listener; others: Listener[]; health: BackendHealth[]; nodeAddresses: string[]; onSave: (listener: Listener) => void; onClose: () => void }) {
-  const [listener, setListener] = useState(initial)
+function ListenerDialog({ initial, hidden, others, health, nodeAddresses, onSave, onClose }: { initial: Listener; hidden: boolean; others: Listener[]; health: BackendHealth[]; nodeAddresses: string[]; onSave: (listener: Listener) => void; onClose: () => void }) {
+  const [listener, setListener] = useState(hidden ? toHiddenListener(initial) : initial)
   const [errors, setErrors] = useState<ListenerErrors>({})
   const [confirmClose, setConfirmClose] = useState(false)
-  const dirty = JSON.stringify(listener) !== JSON.stringify(initial)
+  const dirty = JSON.stringify(listener) !== JSON.stringify(hidden ? toHiddenListener(initial) : initial)
   const close = () => { if (!dirty) { onClose(); return } setConfirmClose(true) }
   const patch = (values: Partial<Listener>) => setListener((current) => ({ ...current, ...values }))
   const toggleProtocol = (protocol: Protocol) => patch({ protocols: listener.protocols.includes(protocol) ? listener.protocols.filter((item) => item !== protocol) : [...listener.protocols, protocol] })
   const patchBackend = (index: number, values: Partial<Backend>) => patch({ backends: listener.backends.map((backend, item) => item === index ? { ...backend, ...values } : backend) })
   const submit = () => {
-    const nextErrors = validateListener(listener, others)
+    const nextErrors = validateListener(listener, others, hidden)
     setErrors(nextErrors)
-    if (Object.keys(nextErrors).length === 0) onSave({ ...listener, name: listener.name.trim() })
+    if (Object.keys(nextErrors).length === 0) onSave({ ...listener, name: listener.name.trim(), ...(hidden ? { sni: normalizeSNI(listener.sni ?? "") } : {}) })
   }
   const enabledBackends = listener.backends.filter((backend) => backend.enabled)
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
 
-  return <Dialog wide title={initial.name === "Новая запись" ? "Новая запись" : `Редактирование · ${initial.name}`} description="Настройте входящий трафик и распределение между выходами." onClose={close}>
+  return <Dialog wide title={initial.name === "Новая запись" ? "Новая запись" : `Редактирование · ${initial.name}`} description={hidden ? "Домен (SNI) определяет, на какие выходы уйдёт подключение." : "Настройте входящий трафик и распределение между выходами."} onClose={close}>
     <div className="dialog__body listener-dialog-body">
       <div className="listener-status-line"><Switch label="Включить запись" checked={listener.enabled} onChange={(enabled) => patch({ enabled })} /><div><strong>{listener.enabled ? "Запись включена" : "Запись выключена"}</strong><span>Изменение вступит в силу после публикации профиля.</span></div></div>
-      <div className="form-grid listener-fields">
-        <Field label="Название" error={errors.name}><Input value={listener.name} aria-invalid={Boolean(errors.name)} onChange={(e) => patch({ name: e.target.value })} /></Field>
-        <Field label="Listen address" error={errors.listen_address}><Input className="input mono" value={listener.listen_address} aria-invalid={Boolean(errors.listen_address)} onChange={(e) => patch({ listen_address: e.target.value })} /></Field>
-        <Field label="Входной порт" error={errors.listen_port}><Input type="number" min={1} max={65535} value={listener.listen_port} aria-invalid={Boolean(errors.listen_port)} onChange={(e) => patch({ listen_port: Number(e.target.value) })} /></Field>
-      </div>
-      <div className="listener-options">
-        <Field label="Протоколы" error={errors.protocols}><div className="protocol-toggle" role="group" aria-label="Протоколы">{(["tcp", "udp"] as Protocol[]).map((protocol) => <button type="button" key={protocol} aria-pressed={listener.protocols.includes(protocol)} onClick={() => toggleProtocol(protocol)}>{protocol.toUpperCase()}</button>)}</div></Field>
+      {hidden ? <>
+        <div className="form-grid">
+          <Field label="Название" error={errors.name}><Input value={listener.name} aria-invalid={Boolean(errors.name)} onChange={(e) => patch({ name: e.target.value })} /></Field>
+          <Field label="SNI (домен)" hint="Точное имя или маска *.example.com — совпадение без учёта регистра" error={errors.sni}><Input className="input mono" placeholder="vpn.example.com" spellCheck={false} autoCapitalize="off" value={listener.sni ?? ""} aria-invalid={Boolean(errors.sni)} onChange={(e) => patch({ sni: e.target.value })} /></Field>
+        </div>
+        <div className="hidden-socket-note"><Lock /><div><strong>Вход: TCP {hiddenPorts.join(" и ")} на IPv4 ноды</strong><span>Подключение с этим SNI уйдёт на выходы ниже по выбранному планировщику. Без SNI или с чужим SNI соединение не проксируется и получает ошибку.</span></div></div>
         <Field label="Планировщик" hint="WRR учитывает вес, RR распределяет поровну"><SelectMenu label="Планировщик" value={listener.scheduler} onChange={(value) => patch({ scheduler: value as Listener["scheduler"] })} options={[{ value: "wrr", label: "Weighted round-robin", description: "Распределение с учётом веса" }, { value: "rr", label: "Round-robin", description: "Равномерное распределение" }]} /></Field>
-      </div>
+      </> : <>
+        <div className="form-grid listener-fields">
+          <Field label="Название" error={errors.name}><Input value={listener.name} aria-invalid={Boolean(errors.name)} onChange={(e) => patch({ name: e.target.value })} /></Field>
+          <Field label="Listen address" error={errors.listen_address}><Input className="input mono" value={listener.listen_address} aria-invalid={Boolean(errors.listen_address)} onChange={(e) => patch({ listen_address: e.target.value })} /></Field>
+          <Field label="Входной порт" error={errors.listen_port}><Input type="number" min={1} max={65535} value={listener.listen_port} aria-invalid={Boolean(errors.listen_port)} onChange={(e) => patch({ listen_port: Number(e.target.value) })} /></Field>
+        </div>
+        <div className="listener-options">
+          <Field label="Протоколы" error={errors.protocols}><div className="protocol-toggle" role="group" aria-label="Протоколы">{(["tcp", "udp"] as Protocol[]).map((protocol) => <button type="button" key={protocol} aria-pressed={listener.protocols.includes(protocol)} onClick={() => toggleProtocol(protocol)}>{protocol.toUpperCase()}</button>)}</div></Field>
+          <Field label="Планировщик" hint="WRR учитывает вес, RR распределяет поровну"><SelectMenu label="Планировщик" value={listener.scheduler} onChange={(value) => patch({ scheduler: value as Listener["scheduler"] })} options={[{ value: "wrr", label: "Weighted round-robin", description: "Распределение с учётом веса" }, { value: "rr", label: "Round-robin", description: "Равномерное распределение" }]} /></Field>
+        </div>
+      </>}
 
       <div className="affinity-row">
         <Field label="Affinity" hint="Закрепляет IP клиента за одним backend; для VPN обычно подходят 1–5 часов" error={errors.affinity_seconds}><SelectMenu label="Время Affinity" value={affinityPresets.some((preset) => preset.value === listener.affinity_seconds) ? String(listener.affinity_seconds) : "custom"} onChange={(value) => patch({ affinity_seconds: value === "custom" ? 300 : Number(value) })} options={[...affinityPresets.map((preset) => ({ value: String(preset.value), label: preset.label, description: preset.description })), { value: "custom", label: "Своё значение", description: "Указать время вручную в секундах" }]} /></Field>
         {affinityPresets.every((preset) => preset.value !== listener.affinity_seconds) && <Field label="Секунд" hint="1–86400"><Input type="number" min={1} max={86400} value={listener.affinity_seconds} aria-invalid={Boolean(errors.affinity_seconds)} onChange={(e) => patch({ affinity_seconds: Number(e.target.value) })} /></Field>}
       </div>
 
-      <div className={`rate-limit-option ${listener.rate_limit_enabled ? "rate-limit-option--active" : ""}`}>
+      {!hidden && <div className={`rate-limit-option ${listener.rate_limit_enabled ? "rate-limit-option--active" : ""}`}>
         <Switch label="Ограничить скорость записи" checked={Boolean(listener.rate_limit_enabled)} onChange={(enabled) => patch({ rate_limit_enabled: enabled, rate_limit_mbps: enabled ? listener.rate_limit_mbps || 100 : 0 })} />
         <div className="rate-limit-option__copy"><strong>Максимальная пропускная способность UDP</strong><span>Лимит применяется к UDP/IPVS на каждой ноде отдельно и независимо для входящего и исходящего направления. TCP обслуживает HAProxy без этого лимита.</span></div>
         {listener.rate_limit_enabled && <Field label="Мбит/с" hint="1–100000" error={errors.rate_limit_mbps}><Input type="number" min={1} max={100000} step={1} value={listener.rate_limit_mbps ?? 100} aria-invalid={Boolean(errors.rate_limit_mbps)} onChange={(event) => patch({ rate_limit_mbps: Number(event.target.value) })} /></Field>}
-      </div>
+      </div>}
 
-      <div className="backend-heading"><div><p className="eyebrow">Выходы</p><h3>{listener.backends.length} backend</h3></div><Button variant="secondary" onClick={() => patch({ backends: [...listener.backends, newBackend()] })}><Plus data-icon="inline-start" />Добавить выход</Button></div>
+      <div className="backend-heading"><div><p className="eyebrow">Выходы</p><h3>{listener.backends.length} backend</h3></div><Button variant="secondary" onClick={() => patch({ backends: [...listener.backends, { ...newBackend(), port: hidden ? 443 : 8080 }] })}><Plus data-icon="inline-start" />Добавить выход</Button></div>
       {errors.backends && <div className="validation-error" role="alert">{errors.backends}</div>}
       <div className="backend-editor-list">{listener.backends.map((backend, index) => {
         const percent = backend.enabled && totalWeight ? Math.round(backend.weight / totalWeight * 100) : 0
@@ -201,7 +250,7 @@ function ListenerDialog({ initial, others, health, nodeAddresses, onSave, onClos
           <Field label="IP-адрес" error={errors[`backend.${index}.address`]}><Input className="input mono" placeholder="1.1.1.1" value={backend.address} aria-invalid={Boolean(errors[`backend.${index}.address`])} onChange={(e) => patchBackend(index, { address: e.target.value })} />{!errors[`backend.${index}.address`] && backend.address && nodeAddresses.includes(backend.address) && <span className="field-warning">Совпадает с IP ноды — трафик пойдёт сам на себя</span>}</Field>
           <Field label="Порт" error={errors[`backend.${index}.port`]}><Input type="number" min={1} max={65535} value={backend.port} aria-invalid={Boolean(errors[`backend.${index}.port`])} onChange={(e) => patchBackend(index, { port: Number(e.target.value) })} /></Field>
           <Field label="Вес" hint={`${percent}% трафика`} error={errors[`backend.${index}.weight`]}><Input type="number" min={1} max={65535} value={backend.weight} aria-invalid={Boolean(errors[`backend.${index}.weight`])} onChange={(e) => patchBackend(index, { weight: Number(e.target.value) })} /></Field>
-          <div className="backend-state"><Badge tone={backend.enabled ? "success" : "neutral"}>{backend.enabled ? `${percent}%` : "off"}</Badge>{backendHealth && <Badge tone={backendHealth.state === "reachable" ? "success" : backendHealth.state === "unreachable" ? "danger" : "neutral"}>{backendHealth.state === "reachable" ? `${backendHealth.latency_millis} ms` : backendHealth.state}</Badge>}</div>
+          <div className="backend-state"><Badge tone={backend.enabled ? "success" : "neutral"}>{backend.enabled ? `${percent}%` : "off"}</Badge>{backendHealth && <Badge tone={backendHealth.state === "reachable" ? "success" : backendHealth.state === "unreachable" ? "danger" : "neutral"}>{backendHealth.state === "reachable" ? `${backendHealth.latency_millis} ms` : backendHealth.state === "unreachable" ? "недоступен" : "нет данных"}</Badge>}</div>
           <Button variant="ghost" className="icon-button danger-hover" aria-label="Удалить backend" onClick={() => patch({ backends: listener.backends.filter((_, item) => item !== index) })}><Trash2 /></Button>
         </Card>
       })}</div>

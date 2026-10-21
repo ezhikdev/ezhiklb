@@ -60,9 +60,63 @@ Reconciliation is differential:
 6. Remove obsolete virtual services.
 7. Persist the applied state and report the actual revision.
 
+### Hidden profiles (2.0)
+
+A profile with `hidden: true` has TCP records identified by `sni` instead of a
+listen socket. The agent compiles each enabled record into a TCP service with
+the node's ingress address, port 443 (a statistics label) and the normalised
+SNI, so service keys stay unique. HAProxy renders one shared frontend:
+
+```text
+fe_ezhiklb.sni  bind INGRESS:80, INGRESS:443
+  tcp-request inspect-delay 5s
+  accept once the full ClientHello (req.ssl_sni) or any non-TLS byte arrived
+  use_backend be_<record> if SNI matches   exact names first, then *.suffix
+  TLS without a match  -> be_ezhiklb.reject-tls   -> abns strict-sni listener (TLS alert)
+  anything else        -> be_ezhiklb.reject-plain -> abns HTTP listener (400, silent close when idle)
+```
+
+The strict-sni listener needs a certificate to parse; the agent creates a
+self-signed placeholder with a random `.invalid` name (`sni-reject.pem` next to
+`state.json`) that no client ever requests. Record backends are the usual
+`be_<listener>` proxies, so weights, affinity, health weight changes and
+statistics work unchanged; statistics carry the SNI.
+
+When a hidden revision is applied the agent installs `EZHIKLB-INPUT` as the
+first `INPUT` rule for IPv4 and IPv6. It RETURNs loopback, ESTABLISHED/RELATED,
+ICMP/ICMPv6, DHCP replies and TCP 22/80/443 plus the ports of listening
+`sshd`, `dropbear` and `ezhiklb` (panel) processes, and DROPs everything else.
+RETURN hands accepted traffic back to the host's own rules, so the chain only
+narrows host policy. `AppliedState.Hidden/InputPorts` persist it: `Restore`
+re-applies it at boot with the saved ports plus fresh detection, and the
+minute diagnostics loop (`EnsureInputFirewall`) follows port changes and
+repairs a removed jump. Leaving hidden mode and decommission remove the chain;
+regular nodes never run inbound-firewall commands. Docker ports published via
+DNAT traverse FORWARD and are outside this chain.
+
+The panel refuses to publish or assign a hidden profile to nodes with an
+agent older than 2.0.0 and the agent API answers 409 to such agents, which
+would otherwise apply the records as ordinary 443 listeners.
+
+### Desired-state identity
+
+Revision numbers are unique only within a profile. Since 2.0 the desired-state
+ETag, the agent's applied state and heartbeats carry the profile ID as well,
+so switching a node to another profile with the same revision number is
+applied. Agents 1.x keep receiving their old ETag format.
+
 Source affinity is optional and defaults to zero. IPVS already keeps packets
 within an existing flow on the same destination; affinity adds a broader
 source-IP template and changes how weights are observed.
+
+## Panel sessions (2.0)
+
+The login exchanges the administrator token for an HMAC-signed session cookie
+(`v2.<expiry+nonce>.<mac>`, 12 hours). The key is derived from the token, so
+sessions survive panel restarts and die with a token change; logout revokes
+the nonce in memory. Failed logins are limited to 10 per client address in 10
+minutes. Mutating admin requests must be JSON and not cross-site
+(`Sec-Fetch-Site`), which blocks CSRF including other sites on the same host.
 
 ## Health checking
 

@@ -28,7 +28,26 @@ export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
 }
 
 export function Switch({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (checked: boolean) => void; label: string; disabled?: boolean }) {
-  return <button type="button" role="checkbox" aria-checked={checked} aria-label={label} disabled={disabled} className={`switch ${checked ? "switch--on" : ""}`} onClick={() => onChange(!checked)}><span aria-hidden="true"><Check /></span></button>
+  return <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} className={`switch ${checked ? "switch--on" : ""}`} onClick={() => onChange(!checked)}><span aria-hidden="true" /></button>
+}
+
+// Checkbox is a labelled tick box for one-off choices such as the hidden
+// profile mode; Switch stays the control for on/off state of records.
+export function Checkbox({ checked, onChange, label, description, disabled = false, className = "" }: { checked: boolean; onChange: (checked: boolean) => void; label: ReactNode; description?: ReactNode; disabled?: boolean; className?: string }) {
+  return <label className={`checkbox ${checked ? "checkbox--on" : ""} ${disabled ? "checkbox--disabled" : ""} ${className}`}>
+    <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
+    <span className="checkbox__box" aria-hidden="true"><Check /></span>
+    <span className="checkbox__text"><strong>{label}</strong>{description && <small>{description}</small>}</span>
+  </label>
+}
+
+export function BrandLogo({ size = 26 }: { size?: number }) {
+  return <img className="brand-logo" src="/logo.png" width={size} height={size} alt="" />
+}
+
+// Decorative dotted grid and slow glows behind every page, as in Ezhik Guard.
+export function Backdrop() {
+  return <div className="backdrop" aria-hidden="true"><div className="backdrop__grid" /><div className="backdrop__glow backdrop__glow--a" /><div className="backdrop__glow backdrop__glow--b" /></div>
 }
 
 export function SelectMenu({ value, options, onChange, label, compact = false }: { value: string; options: { value: string; label: string; description?: string }[]; onChange: (value: string) => void; label: string; compact?: boolean }) {

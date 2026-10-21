@@ -22,6 +22,9 @@ type HealthMonitor struct {
 	logger     *slog.Logger
 	mu         sync.RWMutex
 	results    map[string]domain.BackendHealth
+	// checkMu serializes the periodic loop and manual probes so one probe
+	// round cannot be counted twice towards the thresholds.
+	checkMu sync.Mutex
 }
 
 func NewHealthMonitor(runner Runner, reconciler *Reconciler, logger *slog.Logger) *HealthMonitor {
@@ -79,6 +82,8 @@ func (m *HealthMonitor) CheckNow(ctx context.Context, config domain.HealthCheck,
 }
 
 func (m *HealthMonitor) checkAll(ctx context.Context, config domain.HealthCheck, services []Service) {
+	m.checkMu.Lock()
+	defer m.checkMu.Unlock()
 	addresses := map[string]bool{}
 	for _, service := range services {
 		for _, destination := range service.Destinations {
@@ -95,6 +100,9 @@ func (m *HealthMonitor) checkAll(ctx context.Context, config domain.HealthCheck,
 		result := m.results[address]
 		result.Address = address
 		result.CheckedAt = time.Now().UTC()
+		if result.State == "" {
+			result.State = ReachabilityUnknown
+		}
 		previous := result.State
 		if err == nil {
 			result.ConsecutiveUp++

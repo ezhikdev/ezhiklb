@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="1.2.2"
+EZHIKLB_VERSION="2.0.0"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -219,10 +219,18 @@ log "Installing system dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 packages=(ca-certificates curl openssl iproute2)
+haproxy_preinstalled=1
 if [[ "$ROLE" == "node" || "$ROLE" == "panel-node" ]]; then
   packages+=(haproxy ipvsadm iptables iproute2 iputils-ping conntrack)
+  dpkg-query -W -f='${Status}' haproxy 2>/dev/null | grep -q 'install ok installed' || haproxy_preinstalled=0
 fi
 apt-get install -y "${packages[@]}"
+if [[ "$haproxy_preinstalled" == "0" ]]; then
+  # EzhikLB runs its own ezhiklb-haproxy.service. The distribution unit that
+  # arrived with the package only serves its sample configuration: keep it
+  # from idling as a stray process. A pre-existing HAProxy is never touched.
+  systemctl disable --now haproxy.service 2>/dev/null || true
+fi
 
 if [[ -n "$EXISTING_VERSION" ]]; then
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"

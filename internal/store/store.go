@@ -24,6 +24,19 @@ var ErrInstallerUpdateRequired = errors.New("version 1.2.0 requires a one-time i
 var ErrNodeNotPendingDeletion = errors.New("node is not pending deletion")
 var ErrResetUnsupported = errors.New("сначала обновите все назначенные ноды до 1.0.7, чтобы сбросить распределение клиентов")
 var ErrRateLimitUnsupported = errors.New("сначала обновите все назначенные ноды до 1.1.0, чтобы включить ограничение скорости")
+var ErrHiddenUnsupported = errors.New("сначала обновите назначенные ноды до " + domain.HiddenMinAgentVersion + ", чтобы включить скрытый профиль")
+var ErrProfileNameTaken = errors.New("профиль с таким названием уже существует")
+var ErrNodeNameTaken = errors.New("нода с таким названием уже существует")
+
+// uniqueNameError replaces SQLite's raw UNIQUE violation on a name column
+// with a message the panel can show as is.
+func uniqueNameError(err, replacement error) error {
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), ".name") {
+		return replacement
+	}
+	return err
+}
+
 var profileVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$`)
 
 func resolveVersion(auto bool, requested string, number int64) (string, error) {
@@ -124,21 +137,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			checked_at TEXT NOT NULL,
 			PRIMARY KEY(node_id, address)
 		)`,
-		`CREATE TABLE IF NOT EXISTS service_stats (
-			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-			protocol TEXT NOT NULL,
-			listen_address TEXT NOT NULL,
-			listen_port INTEGER NOT NULL,
-			backend_address TEXT NOT NULL DEFAULT '',
-			backend_port INTEGER NOT NULL DEFAULT 0,
-			connections INTEGER NOT NULL DEFAULT 0,
-			incoming_packets INTEGER NOT NULL DEFAULT 0,
-			outgoing_packets INTEGER NOT NULL DEFAULT 0,
-			incoming_bytes INTEGER NOT NULL DEFAULT 0,
-			outgoing_bytes INTEGER NOT NULL DEFAULT 0,
-			collected_at TEXT NOT NULL,
-			PRIMARY KEY(node_id, protocol, listen_address, listen_port, backend_address, backend_port)
-		)`,
+		`CREATE TABLE IF NOT EXISTS service_stats ` + serviceStatsColumns,
 		`CREATE TABLE IF NOT EXISTS system_settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
@@ -155,21 +154,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			collected_at TEXT NOT NULL,
 			PRIMARY KEY(node_id, collected_at)
 		)`,
-		`CREATE TABLE IF NOT EXISTS traffic_totals (
-			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-			protocol TEXT NOT NULL,
-			listen_address TEXT NOT NULL,
-			listen_port INTEGER NOT NULL,
-			incoming_bytes INTEGER NOT NULL DEFAULT 0,
-			outgoing_bytes INTEGER NOT NULL DEFAULT 0,
-			updated_at TEXT NOT NULL,
-			PRIMARY KEY(node_id, protocol, listen_address, listen_port)
-		)`,
+		`CREATE TABLE IF NOT EXISTS traffic_totals ` + trafficTotalsColumns,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("database migration: %w", err)
 		}
+	}
+	// 2.0.0: hidden-profile records share one socket, so the SNI becomes part
+	// of the statistics keys. Existing rows are kept with an empty SNI.
+	if err := s.addSNIKey(ctx, "service_stats", serviceStatsColumns, "node_id,protocol,listen_address,listen_port,backend_address,backend_port,connections,incoming_packets,outgoing_packets,incoming_bytes,outgoing_bytes,collected_at"); err != nil {
+		return fmt.Errorf("database migration: %w", err)
+	}
+	if err := s.addSNIKey(ctx, "traffic_totals", trafficTotalsColumns, "node_id,protocol,listen_address,listen_port,incoming_bytes,outgoing_bytes,updated_at"); err != nil {
+		return fmt.Errorf("database migration: %w", err)
 	}
 	for _, column := range []struct{ name, definition string }{
 		{"observed_address", `TEXT NOT NULL DEFAULT ''`},
@@ -200,6 +198,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"traffic_reset_at", `TEXT`},
 		{"restart_nonce", `INTEGER NOT NULL DEFAULT 0`},
 		{"restart_ack", `INTEGER NOT NULL DEFAULT 0`},
+		{"applied_profile_id", `TEXT NOT NULL DEFAULT ''`},
 	} {
 		table := "nodes"
 		if column.name == "auto_version" || column.name == "version_label" {
@@ -264,10 +263,68 @@ func (s *Store) initializeSortOrder(ctx context.Context, table string) error {
 	return tx.Commit()
 }
 
-func (s *Store) ensureColumn(ctx context.Context, table, name, definition string) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+const serviceStatsColumns = `(
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			protocol TEXT NOT NULL,
+			listen_address TEXT NOT NULL,
+			listen_port INTEGER NOT NULL,
+			sni TEXT NOT NULL DEFAULT '',
+			backend_address TEXT NOT NULL DEFAULT '',
+			backend_port INTEGER NOT NULL DEFAULT 0,
+			connections INTEGER NOT NULL DEFAULT 0,
+			incoming_packets INTEGER NOT NULL DEFAULT 0,
+			outgoing_packets INTEGER NOT NULL DEFAULT 0,
+			incoming_bytes INTEGER NOT NULL DEFAULT 0,
+			outgoing_bytes INTEGER NOT NULL DEFAULT 0,
+			collected_at TEXT NOT NULL,
+			PRIMARY KEY(node_id, protocol, listen_address, listen_port, sni, backend_address, backend_port)
+		)`
+
+const trafficTotalsColumns = `(
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			protocol TEXT NOT NULL,
+			listen_address TEXT NOT NULL,
+			listen_port INTEGER NOT NULL,
+			sni TEXT NOT NULL DEFAULT '',
+			incoming_bytes INTEGER NOT NULL DEFAULT 0,
+			outgoing_bytes INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(node_id, protocol, listen_address, listen_port, sni)
+		)`
+
+// addSNIKey rebuilds a pre-2.0 statistics table with the sni column in its
+// primary key. SQLite cannot alter a primary key in place; the copy keeps
+// every counter so traffic deltas stay continuous across the upgrade.
+func (s *Store) addSNIKey(ctx context.Context, table, definition, columns string) error {
+	found, err := s.hasColumn(ctx, table, "sni")
+	if err != nil || found {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
+	}
+	defer tx.Rollback()
+	legacy := table + "_v1"
+	for _, statement := range []string{
+		`ALTER TABLE ` + table + ` RENAME TO ` + legacy,
+		`CREATE TABLE ` + table + ` ` + definition,
+		// Orphans cannot exist with foreign keys on, but must not abort the
+		// upgrade of a database that was ever written without them.
+		`INSERT INTO ` + table + `(` + columns + `) SELECT ` + columns + ` FROM ` + legacy + ` WHERE node_id IN (SELECT id FROM nodes)`,
+		`DROP TABLE ` + legacy,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("rebuild %s: %w", table, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) hasColumn(ctx context.Context, table, name string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
 	}
 	found := false
 	for rows.Next() {
@@ -277,17 +334,19 @@ func (s *Store) ensureColumn(ctx context.Context, table, name, definition string
 		var defaultValue sql.NullString
 		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			rows.Close()
-			return err
+			return false, err
 		}
 		if columnName == name {
 			found = true
 		}
 	}
-	if err := rows.Close(); err != nil {
+	return found, rows.Close()
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, name, definition string) error {
+	found, err := s.hasColumn(ctx, table, name)
+	if err != nil || found {
 		return err
-	}
-	if found {
-		return nil
 	}
 	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+name+` `+definition)
 	return err
@@ -393,7 +452,21 @@ func (s *Store) ListProfiles(ctx context.Context) ([]domain.Profile, error) {
 		}
 		result = append(result, profile)
 	}
-	return result, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	// Profile cards show the mode and size of the current revision.
+	for index := range result {
+		var configJSON string
+		if err := s.db.QueryRowContext(ctx, `SELECT config_json FROM profile_revisions WHERE profile_id=? AND number=?`, result[index].ID, result[index].CurrentRevision).Scan(&configJSON); err != nil {
+			continue
+		}
+		var config domain.ProfileConfig
+		if json.Unmarshal([]byte(configJSON), &config) == nil {
+			result[index].Hidden, result[index].Records = config.Hidden, len(config.Listeners)
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) ReorderProfiles(ctx context.Context, ids []string) error {
@@ -439,7 +512,7 @@ func (s *Store) CreateProfile(ctx context.Context, name, description string, con
 	if _, err = tx.ExecContext(ctx,
 		`INSERT INTO profiles(id,name,description,current_revision,auto_version,version_label,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 		id, name, description, 1, autoVersion, version, sortOrder, formatTime(now), formatTime(now)); err != nil {
-		return domain.Profile{}, domain.Revision{}, err
+		return domain.Profile{}, domain.Revision{}, uniqueNameError(err, ErrProfileNameTaken)
 	}
 	result, err := tx.ExecContext(ctx,
 		`INSERT INTO profile_revisions(profile_id,number,version_label,config_json,created_at) VALUES(?,?,?,?,?)`,
@@ -533,6 +606,13 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 			return domain.Profile{}, domain.Revision{}, rowsErr
 		}
 	}
+	if config.Hidden {
+		if outdated, err := profileHasOutdatedAgents(ctx, tx, profileID, domain.HiddenMinAgentVersion); err != nil {
+			return domain.Profile{}, domain.Revision{}, err
+		} else if outdated {
+			return domain.Profile{}, domain.Revision{}, ErrHiddenUnsupported
+		}
+	}
 	var duplicate int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM profile_revisions WHERE profile_id=? AND version_label=?`, profileID, version).Scan(&duplicate); err != nil {
 		return domain.Profile{}, domain.Revision{}, err
@@ -549,7 +629,7 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 	if _, err = tx.ExecContext(ctx,
 		`UPDATE profiles SET name=?,description=?,current_revision=?,auto_version=?,version_label=?,updated_at=? WHERE id=?`,
 		name, description, next, autoVersion, version, formatTime(now), profileID); err != nil {
-		return domain.Profile{}, domain.Revision{}, err
+		return domain.Profile{}, domain.Revision{}, uniqueNameError(err, ErrProfileNameTaken)
 	}
 	nodesResult, err := tx.ExecContext(ctx,
 		`UPDATE nodes SET desired_revision=?,reset_revision=CASE WHEN ? THEN ? ELSE 0 END,updated_at=? WHERE profile_id=?`, next, resetConnections, next, formatTime(now), profileID)
@@ -566,6 +646,27 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 	revisionID, _ := result.LastInsertId()
 	profile, _, err := s.GetProfile(ctx, profileID)
 	return profile, domain.Revision{ID: revisionID, ProfileID: profileID, Number: next, Version: version, Config: config, CreatedAt: now}, err
+}
+
+// profileHasOutdatedAgents reports whether a node on the profile runs an agent
+// older than minimum. Nodes that never connected are skipped: the agent API
+// refuses to hand them a configuration they cannot apply.
+func profileHasOutdatedAgents(ctx context.Context, tx *sql.Tx, profileID, minimum string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT agent_version FROM nodes WHERE profile_id=? AND agent_version<>''`, profileID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var agentVersion string
+		if err := rows.Scan(&agentVersion); err != nil {
+			return false, err
+		}
+		if domain.CompareVersions(agentVersion, minimum) < 0 {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *Store) ListRevisions(ctx context.Context, profileID string) ([]domain.Revision, error) {
@@ -659,6 +760,12 @@ func (s *Store) ListNodes(ctx context.Context) ([]domain.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Revision numbers are per profile: after switching profiles the old
+		// and new revision can share a number. A 2.0+ agent reports which
+		// profile it applied, so a mismatch is shown as not yet applied.
+		if node.AppliedProfileID != "" && node.AppliedProfileID != node.ProfileID {
+			node.AppliedRevision = 0
+		}
 		if node.Status != "disabled" && node.Status != "deleting" && node.LastSeenAt == nil {
 			node.Status = "connecting"
 		} else if node.Status != "disabled" && node.Status != "deleting" && time.Since(*node.LastSeenAt) > 45*time.Second {
@@ -745,7 +852,7 @@ func (s *Store) CreateNode(ctx context.Context, name, ingressAddress, profileID 
 		return domain.Node{}, "", err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO nodes(id,name,ingress_address,profile_id,desired_revision,status,apply_state,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, name, ingressAddress, profileID, revision, "connecting", "waiting", sortOrder, formatTime(now), formatTime(now)); err != nil {
-		return domain.Node{}, "", err
+		return domain.Node{}, "", uniqueNameError(err, ErrNodeNameTaken)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO node_credentials(node_id,token_hash,created_at,rotated_at) VALUES(?,?,?,?)`, id, tokenHash(token), formatTime(now), formatTime(now)); err != nil {
 		return domain.Node{}, "", err
@@ -834,7 +941,7 @@ func (s *Store) SetNodeEnabled(ctx context.Context, nodeID string, enabled bool)
 func (s *Store) UpdateNode(ctx context.Context, nodeID, name, ingressAddress string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET name=?,ingress_address=?,updated_at=? WHERE id=?`, name, ingressAddress, formatTime(time.Now().UTC()), nodeID)
 	if err != nil {
-		return err
+		return uniqueNameError(err, ErrNodeNameTaken)
 	}
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
@@ -933,15 +1040,18 @@ func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) err
 	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
 		return err
 	}
-	if config.HasRateLimits() {
+	if config.HasRateLimits() || config.Hidden {
 		var agentVersion string
 		if err := s.db.QueryRowContext(ctx, `SELECT agent_version FROM nodes WHERE id=?`, nodeID).Scan(&agentVersion); errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		} else if err != nil {
 			return err
 		}
-		if agentVersion != "" && domain.CompareVersions(agentVersion, "1.1.0") < 0 {
+		if config.HasRateLimits() && agentVersion != "" && domain.CompareVersions(agentVersion, "1.1.0") < 0 {
 			return ErrRateLimitUnsupported
+		}
+		if config.Hidden && agentVersion != "" && domain.CompareVersions(agentVersion, domain.HiddenMinAgentVersion) < 0 {
+			return ErrHiddenUnsupported
 		}
 	}
 	result, err := s.db.ExecContext(ctx,
@@ -1019,7 +1129,7 @@ func (s *Store) RequestHealthProbe(ctx context.Context, nodeID string) (int64, e
 	return nonce, nil
 }
 
-func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, diagnostics domain.NodeDiagnostics, updateState, updateError string, restartAck int64, decommissioned bool) error {
+func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress, applyState string, applied int64, appliedProfile, applyError string, health []domain.BackendHealth, stats []domain.ServiceStat, metrics domain.NodeMetrics, diagnostics domain.NodeDiagnostics, updateState, updateError string, restartAck int64, decommissioned bool) error {
 	status := "online"
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1091,8 +1201,8 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	if updateTarget == "" && previousUpdateState == "completed" && updateState == "idle" {
 		updateState = "completed"
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,restart_ack=CASE WHEN ?>restart_ack THEN ? ELSE restart_ack END,updated_at=? WHERE id=? AND status<>'disabled'`,
-		applied, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, restartAck, restartAck, formatTime(now), nodeID)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,applied_profile_id=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,restart_ack=CASE WHEN ?>restart_ack THEN ? ELSE restart_ack END,updated_at=? WHERE id=? AND status<>'disabled'`,
+		applied, appliedProfile, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, restartAck, restartAck, formatTime(now), nodeID)
 	if err != nil {
 		return err
 	}
@@ -1135,8 +1245,8 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 			return err
 		}
 		for _, item := range stats {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO service_stats(node_id,protocol,listen_address,listen_port,backend_address,backend_port,connections,incoming_packets,outgoing_packets,incoming_bytes,outgoing_bytes,collected_at)
-				VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, nodeID, item.Protocol, item.ListenAddress, item.ListenPort, item.BackendAddress, item.BackendPort, item.Connections, item.IncomingPackets, item.OutgoingPackets, item.IncomingBytes, item.OutgoingBytes, formatTime(item.CollectedAt)); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO service_stats(node_id,protocol,listen_address,listen_port,sni,backend_address,backend_port,connections,incoming_packets,outgoing_packets,incoming_bytes,outgoing_bytes,collected_at)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, nodeID, item.Protocol, item.ListenAddress, item.ListenPort, item.SNI, item.BackendAddress, item.BackendPort, item.Connections, item.IncomingPackets, item.OutgoingPackets, item.IncomingBytes, item.OutgoingBytes, formatTime(item.CollectedAt)); err != nil {
 				return err
 			}
 		}
@@ -1202,7 +1312,7 @@ func (s *Store) ListHealth(ctx context.Context) ([]domain.BackendHealth, error) 
 }
 
 func (s *Store) ListStats(ctx context.Context) ([]domain.ServiceStat, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT node_id,protocol,listen_address,listen_port,backend_address,backend_port,connections,incoming_packets,outgoing_packets,incoming_bytes,outgoing_bytes,collected_at FROM service_stats ORDER BY node_id,protocol,listen_address,listen_port,backend_address,backend_port`)
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id,protocol,listen_address,listen_port,sni,backend_address,backend_port,connections,incoming_packets,outgoing_packets,incoming_bytes,outgoing_bytes,collected_at FROM service_stats ORDER BY node_id,protocol,listen_address,listen_port,sni,backend_address,backend_port`)
 	if err != nil {
 		return nil, err
 	}
@@ -1211,7 +1321,7 @@ func (s *Store) ListStats(ctx context.Context) ([]domain.ServiceStat, error) {
 	for rows.Next() {
 		var item domain.ServiceStat
 		var collected string
-		if err := rows.Scan(&item.NodeID, &item.Protocol, &item.ListenAddress, &item.ListenPort, &item.BackendAddress, &item.BackendPort, &item.Connections, &item.IncomingPackets, &item.OutgoingPackets, &item.IncomingBytes, &item.OutgoingBytes, &collected); err != nil {
+		if err := rows.Scan(&item.NodeID, &item.Protocol, &item.ListenAddress, &item.ListenPort, &item.SNI, &item.BackendAddress, &item.BackendPort, &item.Connections, &item.IncomingPackets, &item.OutgoingPackets, &item.IncomingBytes, &item.OutgoingBytes, &collected); err != nil {
 			return nil, err
 		}
 		item.CollectedAt, err = parseTime(collected)
@@ -1224,13 +1334,13 @@ func (s *Store) ListStats(ctx context.Context) ([]domain.ServiceStat, error) {
 }
 
 func (s *Store) ListTrafficTotals(ctx context.Context, nodeID string) ([]domain.TrafficTotal, error) {
-	query := `SELECT node_id,protocol,listen_address,listen_port,incoming_bytes,outgoing_bytes,updated_at FROM traffic_totals`
+	query := `SELECT node_id,protocol,listen_address,listen_port,sni,incoming_bytes,outgoing_bytes,updated_at FROM traffic_totals`
 	args := []any{}
 	if nodeID != "" { query += ` WHERE node_id=?`; args = append(args, nodeID) }
-	query += ` ORDER BY node_id,listen_port,protocol`
+	query += ` ORDER BY node_id,listen_port,protocol,sni`
 	rows, err := s.db.QueryContext(ctx, query, args...); if err != nil { return nil, err }; defer rows.Close()
 	result := make([]domain.TrafficTotal, 0)
-	for rows.Next() { var item domain.TrafficTotal; var updated string; if err := rows.Scan(&item.NodeID,&item.Protocol,&item.ListenAddress,&item.ListenPort,&item.IncomingBytes,&item.OutgoingBytes,&updated); err != nil { return nil, err }; item.UpdatedAt, err = parseTime(updated); if err != nil { return nil, err }; result = append(result,item) }
+	for rows.Next() { var item domain.TrafficTotal; var updated string; if err := rows.Scan(&item.NodeID,&item.Protocol,&item.ListenAddress,&item.ListenPort,&item.SNI,&item.IncomingBytes,&item.OutgoingBytes,&updated); err != nil { return nil, err }; item.UpdatedAt, err = parseTime(updated); if err != nil { return nil, err }; result = append(result,item) }
 	return result, rows.Err()
 }
 
@@ -1239,27 +1349,27 @@ func counterDelta(current, previous uint64) uint64 {
 	return current
 }
 
-func statCounterKey(protocol domain.Protocol, address string, port uint16) string {
-	return fmt.Sprintf("%s/%s:%d", protocol, address, port)
+func statCounterKey(protocol domain.Protocol, address string, port uint16, sni string) string {
+	return fmt.Sprintf("%s/%s:%d#%s", protocol, address, port, sni)
 }
 
 func accumulateTrafficTx(ctx context.Context, tx *sql.Tx, nodeID string, stats []domain.ServiceStat, now time.Time) error {
 	previous := map[string]domain.ServiceStat{}
-	rows, err := tx.QueryContext(ctx, `SELECT protocol,listen_address,listen_port,incoming_bytes,outgoing_bytes FROM service_stats WHERE node_id=? AND backend_address=''`, nodeID)
+	rows, err := tx.QueryContext(ctx, `SELECT protocol,listen_address,listen_port,sni,incoming_bytes,outgoing_bytes FROM service_stats WHERE node_id=? AND backend_address=''`, nodeID)
 	if err != nil { return err }
-	for rows.Next() { var item domain.ServiceStat; if err := rows.Scan(&item.Protocol,&item.ListenAddress,&item.ListenPort,&item.IncomingBytes,&item.OutgoingBytes); err != nil { rows.Close(); return err }; previous[statCounterKey(item.Protocol,item.ListenAddress,item.ListenPort)] = item }
+	for rows.Next() { var item domain.ServiceStat; if err := rows.Scan(&item.Protocol,&item.ListenAddress,&item.ListenPort,&item.SNI,&item.IncomingBytes,&item.OutgoingBytes); err != nil { rows.Close(); return err }; previous[statCounterKey(item.Protocol,item.ListenAddress,item.ListenPort,item.SNI)] = item }
 	if err := rows.Close(); err != nil { return err }
 	var accounting, records bool
 	if err := tx.QueryRowContext(ctx, `SELECT traffic_accounting_enabled,traffic_records_enabled FROM nodes WHERE id=?`, nodeID).Scan(&accounting,&records); err != nil { return err }
 	var nodeIn, nodeOut uint64
 	for _, item := range stats {
 		if item.BackendAddress != "" { continue }
-		old := previous[statCounterKey(item.Protocol,item.ListenAddress,item.ListenPort)]
+		old := previous[statCounterKey(item.Protocol,item.ListenAddress,item.ListenPort,item.SNI)]
 		incoming := counterDelta(item.IncomingBytes, old.IncomingBytes)
 		outgoing := counterDelta(item.OutgoingBytes, old.OutgoingBytes)
 		nodeIn += incoming; nodeOut += outgoing
 		if records {
-			_, err := tx.ExecContext(ctx, `INSERT INTO traffic_totals(node_id,protocol,listen_address,listen_port,incoming_bytes,outgoing_bytes,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id,protocol,listen_address,listen_port) DO UPDATE SET incoming_bytes=incoming_bytes+excluded.incoming_bytes,outgoing_bytes=outgoing_bytes+excluded.outgoing_bytes,updated_at=excluded.updated_at`, nodeID,item.Protocol,item.ListenAddress,item.ListenPort,incoming,outgoing,formatTime(now))
+			_, err := tx.ExecContext(ctx, `INSERT INTO traffic_totals(node_id,protocol,listen_address,listen_port,sni,incoming_bytes,outgoing_bytes,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(node_id,protocol,listen_address,listen_port,sni) DO UPDATE SET incoming_bytes=incoming_bytes+excluded.incoming_bytes,outgoing_bytes=outgoing_bytes+excluded.outgoing_bytes,updated_at=excluded.updated_at`, nodeID,item.Protocol,item.ListenAddress,item.ListenPort,item.SNI,incoming,outgoing,formatTime(now))
 			if err != nil { return err }
 		}
 	}
@@ -1358,7 +1468,7 @@ func (s *Store) getRevision(ctx context.Context, profileID string, number int64)
 	return r, err
 }
 
-const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,traffic_accounting_enabled,traffic_records_enabled,traffic_auto_reset_enabled,traffic_reset_day,traffic_incoming_bytes,traffic_outgoing_bytes,traffic_reset_at,restart_nonce,sort_order,created_at,updated_at FROM nodes`
+const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,applied_profile_id,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,traffic_accounting_enabled,traffic_records_enabled,traffic_auto_reset_enabled,traffic_reset_day,traffic_incoming_bytes,traffic_outgoing_bytes,traffic_reset_at,restart_nonce,sort_order,created_at,updated_at FROM nodes`
 
 func scanNode(row scanner) (domain.Node, error) {
 	var n domain.Node
@@ -1366,7 +1476,7 @@ func scanNode(row scanner) (domain.Node, error) {
 	var created, updated string
 	var metrics domain.NodeMetrics
 	var diagnosticsJSON string
-	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &n.TrafficAccountingEnabled, &n.TrafficRecordsEnabled, &n.TrafficAutoResetEnabled, &n.TrafficResetDay, &n.TrafficIncomingBytes, &n.TrafficOutgoingBytes, &trafficResetAt, &n.RestartNonce, &n.SortOrder, &created, &updated)
+	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AppliedProfileID, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &n.TrafficAccountingEnabled, &n.TrafficRecordsEnabled, &n.TrafficAutoResetEnabled, &n.TrafficResetDay, &n.TrafficIncomingBytes, &n.TrafficOutgoingBytes, &trafficResetAt, &n.RestartNonce, &n.SortOrder, &created, &updated)
 	if err != nil {
 		return n, err
 	}

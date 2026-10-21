@@ -27,11 +27,15 @@ export interface Listener {
   affinity_seconds: number
   rate_limit_enabled?: boolean
   rate_limit_mbps?: number
+  /** TLS server name a hidden profile routes by (kept but unused in regular profiles). */
+  sni?: string
   backends: Backend[]
 }
 
 export interface ProfileConfig {
   schema_version: number
+  /** Hidden profile: TCP 80/443 only, routing by SNI, other inbound ports closed. */
+  hidden?: boolean
   health_check: HealthCheck
   listeners: Listener[]
 }
@@ -46,6 +50,8 @@ export interface Profile {
   created_at: string
   updated_at: string
   sort_order: number
+  hidden?: boolean
+  records?: number
 }
 
 export interface Revision {
@@ -74,6 +80,7 @@ export interface NodeInfo {
   profile_id: string
   desired_revision: number
   applied_revision: number
+  applied_profile_id?: string
   agent_version: string
   status: "connecting" | "online" | "offline" | "error" | "disabled" | "deleting"
   apply_state: "waiting" | "applying" | "applied" | "error" | "disabled" | "decommissioning"
@@ -108,6 +115,9 @@ export interface NodeDiagnostics {
   rate_limit_entries?: number
   rate_limit_drops?: number
   rate_limit_error?: string
+  hidden_mode?: boolean
+  input_firewall_ready?: boolean
+  allowed_input_ports?: number[]
   error?: string
   checked_at: string
 }
@@ -164,6 +174,7 @@ export interface ServiceStat {
   protocol: Protocol
   listen_address: string
   listen_port: number
+  sni?: string
   backend_address?: string
   backend_port?: number
   connections: number
@@ -179,6 +190,7 @@ export interface TrafficTotal {
   protocol?: Protocol
   listen_address?: string
   listen_port?: number
+  sni?: string
   incoming_bytes: number
   outgoing_bytes: number
   updated_at: string

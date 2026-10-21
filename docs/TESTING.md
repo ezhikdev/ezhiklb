@@ -233,3 +233,56 @@ Run these only on disposable test VPS nodes.
     Confirm local data plane is cleared before removal, remote nodes continue
     forwarding, and backups remain. Check node-only uninstall preserves a
     co-installed panel and its administrator credentials.
+
+## 2.0.0 acceptance checks — hidden profiles, SNI routing, upgrade
+
+The 2.0.0 release was verified on an isolated Docker stand (systemd node
+container with the panel and agent installed by `install.sh`, two backend
+containers with TLS/TCP/UDP test servers, own network namespace, so the host
+firewall and services were untouched). The automated stand scripts covered
+checks 69–80; repeat them on a disposable VPS before production rollout.
+
+69. Create a regular TCP+UDP profile, assign it and confirm both protocols and
+    weighted balancing work and no `EZHIKLB-INPUT` chain exists.
+70. Create a hidden profile with exact, mixed-case and `*.domain` records and
+    assign it. Confirm `curl --resolve name:443:NODE https://name/` and the same
+    on port 80 reach the record's backends, the wildcard balances across its
+    backends and does not match the bare domain, and exact names win.
+71. Unknown SNI and missing SNI must get a TLS alert (`openssl s_client
+    -servername unknown.test`, `-noservername`); plain HTTP on 80 and 443 gets
+    `400`; a bare TCP connect to 80/443 succeeds and an idle connection is
+    closed silently after about 10 s.
+72. With the hidden profile active, a service listening on another port is
+    unreachable from outside; 22, 80, 443, the SSH daemon's real ports and a
+    co-located panel's web/agent ports stay reachable. Check `iptables -S
+    EZHIKLB-INPUT` and `ip6tables -S EZHIKLB-INPUT` end with `-j DROP` and the
+    INPUT jump is the first rule. UDP forwarding of the previous profile stops.
+73. Change the SSH port or remove the INPUT jump manually; within a minute the
+    agent re-applies the chain with the new port. The node card shows
+    "Скрытый режим" and the allowed ports.
+74. Panel statistics and record traffic counters are separate per SNI record.
+75. Publish a new hidden revision while a long TLS session through the node is
+    active: the session keeps streaming, the new record works.
+76. Restart `ezhiklb-agent` and reboot the node: SNI routing recovers by itself
+    (a gap of up to 10–20 s is acceptable), the inbound firewall is restored
+    without the panel, and only one HAProxy master plus its current worker
+    remain once draining sessions end — no zombies.
+77. Switch back to the regular profile: TCP/UDP work again, the inbound chain is
+    removed (IPv4 and IPv6) and 80/443 are released.
+78. A hidden profile is refused for nodes running agent < 2.0.0 (publish and
+    assign return `agent_update_required`; the agent API returns 409 to 1.x
+    agents) and for nodes where 80/443 are taken by another program.
+79. Assign a second profile whose current revision has the same number as the
+    current one (for example two fresh `v1` profiles): the agent must apply it
+    and the panel must not report it as applied before that.
+80. Upgrade a node installed from the published 1.2.1 release with
+    `install.sh` 2.0.0: profiles, the node, traffic counters and forwarding are
+    preserved, the administrator signs in again (sessions no longer carry the
+    token), and a hidden profile can be applied afterwards. `uninstall-node.sh`
+    removes all `EZHIKLB-*` chains including `EZHIKLB-INPUT`.
+81. Security: after 10 wrong tokens the login answers `429` for 10 minutes; a
+    cookie containing the raw administrator token is rejected; a POST with
+    `Content-Type: text/plain` or `Sec-Fetch-Site: cross-site` is refused.
+82. UI: check both themes and the phone layout (menu drawer), the hidden-profile
+    checkbox at the top of the profile form, SNI validation and the publish
+    button staying disabled while a record has no SNI.

@@ -109,3 +109,43 @@ func TestSelfUninstallRequiresRequestAndOwnCredential(t *testing.T) {
 		t.Fatal("deleted node still authenticates")
 	}
 }
+
+// Revision numbers are per profile. Switching to another profile at the same
+// revision number used to produce an identical ETag, so the agent never
+// applied the new profile while the panel reported it as applied.
+func TestProfileSwitchWithSameRevisionNumberReachesAgent(t *testing.T) {
+	st, handler, node, token := testNodeServer(t)
+	ctx := context.Background()
+	path := "/agent/v1/nodes/" + node.ID + "/desired"
+	first := agentRequest(handler, "GET", path, token, "", "")
+	if first.Code != http.StatusOK {
+		t.Fatalf("desired: %d", first.Code)
+	}
+	var before domain.NodeDesiredState
+	_ = json.Unmarshal(first.Body.Bytes(), &before)
+	heartbeat := `{"version":"` + Version + `","applied_revision":1,"applied_profile_id":"` + before.ProfileID + `","apply_state":"applied"}`
+	if response := agentRequest(handler, "POST", "/agent/v1/nodes/"+node.ID+"/heartbeat", token, heartbeat, ""); response.Code != http.StatusNoContent {
+		t.Fatalf("heartbeat: %d %s", response.Code, response.Body)
+	}
+	other, revision, err := st.CreateProfile(ctx, "Other", "", domain.DefaultProfileConfig(), true, "")
+	if err != nil || revision.Number != before.Revision {
+		t.Fatalf("second profile must start at the same revision number: %v %v", revision.Number, err)
+	}
+	if err := st.AssignProfile(ctx, node.ID, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	switched := agentRequest(handler, "GET", path, token, "", first.Header().Get("ETag"))
+	var after domain.NodeDesiredState
+	if switched.Code != http.StatusOK || json.Unmarshal(switched.Body.Bytes(), &after) != nil || after.ProfileID != other.ID {
+		t.Fatalf("profile switch was cached as unchanged: %d %s", switched.Code, switched.Body)
+	}
+	nodes, err := st.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range nodes {
+		if item.ID == node.ID && item.AppliedRevision == item.DesiredRevision {
+			t.Fatalf("node reported in sync before applying the new profile: %#v", item)
+		}
+	}
+}

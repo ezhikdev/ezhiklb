@@ -37,7 +37,7 @@ func uninstallNode(logger *slog.Logger) error {
 		return err
 	}
 	if requested {
-		if err := api.heartbeat(ctx, nodeID, 0, "", "decommissioning", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, true); err != nil {
+		if err := api.heartbeat(ctx, nodeID, 0, "", "", "decommissioning", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, true); err != nil {
 			logger.Warn("local cleanup completed; force-delete the pending node from the panel", "error", err)
 		}
 	}

@@ -4,13 +4,14 @@
 
 **EzhikLB (Ezhik Load Balancer)** объединяет панель управления, переиспользуемые профили и удалённые ноды. TCP проксирует HAProxy Community, UDP остаётся на IPVS NAT в ядре Linux, а панель отвечает за конфигурацию, health-check, наблюдение и обновления.
 
-![Version](https://img.shields.io/badge/version-1.2.2-65c795?style=flat-square)
+![Version](https://img.shields.io/badge/version-2.0.0-65c795?style=flat-square)
 ![Protocols](https://img.shields.io/badge/protocols-TCP%20%2B%20UDP-e7e3dc?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Linux-9fa6b2?style=flat-square)
 
 ## Главное
 
 - TCP, UDP или оба протокола в одной записи;
+- **скрытые профили**: только TCP 80/443, маршрутизация по SNI и автоматическое закрытие лишних входящих портов ноды;
 - необязательный лимит Мбит/с для UDP/IPVS, отдельно на каждой ноде и в каждом направлении;
 - накопительный учёт входящего/исходящего трафика по ноде и каждой записи, ручной и ежемесячный сброс;
 - балансировка по весам и планировщики `wrr` / `rr`;
@@ -29,11 +30,12 @@
 
 Таблица сравнивает EzhikLB с базовыми open-source установками без сторонних панелей и коммерческих модулей.
 
-| Возможность | EzhikLB 1.2 | NGINX Open Source | HAProxy Community |
+| Возможность | EzhikLB 2.0 | NGINX Open Source | HAProxy Community |
 |---|:---:|:---:|:---:|
 | Балансировка TCP | Да | Да, модуль `stream` | Да |
 | Универсальная балансировка UDP | Да | Да, модуль `stream` | Нет, UDP-модуль относится к HAProxy Enterprise |
 | TCP и UDP в одной записи | Да | Настраиваются отдельно | Не в Community |
+| Маршрутизация TCP по SNI из web-панели с закрытием лишних портов | Да, скрытый профиль | Вручную, `ssl_preread` | Вручную, `req.ssl_sni` |
 | Веса backend-серверов | Да | Да | Да |
 | Активная проверка доступности без платной редакции | Да, ICMP | Только пассивная; периодическая активная проверка относится к NGINX Plus | Да для поддерживаемых режимов |
 | Полноценное управление конфигурацией из web | Да | Нет | Нет; встроенная страница предназначена в основном для статистики |
@@ -45,7 +47,7 @@
 
 NGINX умеет универсально проксировать TCP/UDP через `stream`, но периодические активные health-check и динамическая конфигурация upstream описаны как возможности коммерческой подписки. HAProxy Community отлично подходит для TCP/HTTP и имеет страницу статистики, однако универсальная UDP-балансировка поставляется отдельным модулем HAProxy Enterprise. Источники: [NGINX stream](https://nginx.org/en/docs/stream/ngx_stream_upstream_module.html), [NGINX active health checks](https://nginx.org/en/docs/stream/ngx_stream_upstream_hc_module.html), [HAProxy UDP module](https://www.haproxy.com/documentation/haproxy-enterprise/enterprise-modules/udp-load-balancing/overview/), [HAProxy Stats page](https://www.haproxy.com/blog/exploring-the-haproxy-stats-page).
 
-EzhikLB ориентирован именно на простое управление L4-балансировкой. Он не заменяет возможности Caddy, NGINX или HAProxy на уровне HTTP: TLS termination, WAF, маршрутизацию по доменам и заголовкам лучше оставлять специализированному reverse proxy.
+EzhikLB ориентирован именно на простое управление L4-балансировкой. Маршрутизация по SNI в скрытых профилях выполняется без расшифровки TLS. EzhikLB не заменяет возможности Caddy, NGINX или HAProxy на уровне HTTP: TLS termination, WAF, маршрутизацию по заголовкам и путям лучше оставлять специализированному reverse proxy.
 
 ## Как устроено
 
@@ -73,7 +75,7 @@ EzhikLB ориентирован именно на простое управле
 Одна команда запускает интерактивный установщик. Внутри можно выбрать панель, ноду или оба компонента:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=1.2.2 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
+sudo apt-get update && sudo apt-get install -y ca-certificates curl && ezhik_version=2.0.0 && ezhik_tmp=$(mktemp -d) && cd "$ezhik_tmp" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && curl -fLO "https://github.com/ezhikdev/ezhiklb/releases/download/v${ezhik_version}/ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && sha256sum -c "ezhiklb_${ezhik_version}_linux_amd64.tar.gz.sha256" && tar -xzf "ezhiklb_${ezhik_version}_linux_amd64.tar.gz" && sudo ./install.sh && cd / && rm -rf -- "$ezhik_tmp"
 ```
 
 Варианты установки:
@@ -156,6 +158,37 @@ sudo bash /opt/ezhiklb/uninstall-panel.sh
 снова доступны из панели.
 
 ICMP health-check проверяет доступность IP-адреса, но не подтверждает работу конкретного приложения на TCP/UDP-порту.
+
+## Скрытые профили
+
+В верхней части формы создания и редактирования профиля есть галочка
+**«Скрытый профиль»**. Профиль в этом режиме:
+
+- принимает подключения на TCP **80 и 443** входящего IPv4 ноды — каждая запись
+  доступна на обоих портах;
+- маршрутизирует каждое подключение по **SNI** из TLS ClientHello. У каждой
+  записи обязательное поле SNI: точное имя (`vpn.example.com`) или маска
+  (`*.example.com`, совпадает с поддоменами, но не с самим доменом). Сравнение
+  без учёта регистра, точные имена имеют приоритет над масками;
+- распределяет совпавшие подключения по выходам записи прежней логикой: веса,
+  `wrr`/`rr`, Affinity, health-check;
+- отвечает ошибкой, если SNI нет или он не совпал ни с одной записью: TLS-клиент
+  получает TLS alert, обычный HTTP — `400 Bad Request`. TCP-соединение при этом
+  устанавливается, поэтому проверка доступности портов 80/443 работает;
+- закрывает все остальные входящие порты ноды цепочкой `EZHIKLB-INPUT` (IPv4 и
+  IPv6). Открытыми остаются `22`, `80`, `443`, фактические порты SSH-сервера и
+  панели EzhikLB на этой же машине, loopback, ICMP, DHCP и ответы на исходящие
+  соединения. Цепочка только сужает правила хоста и никогда не открывает
+  закрытое; агент проверяет её раз в минуту и восстанавливает после ufw или
+  перезагрузки.
+
+UDP, явные входные порты и лимиты скорости в скрытом профиле не используются.
+Порты 80/443 должны быть свободны на входящем IP ноды: агент откажется
+применять профиль, если их занимает, например, nginx. Порты контейнеров Docker,
+опубликованные через DNAT, проходят цепочку FORWARD и этим режимом не
+закрываются. Скрытый профиль требует агента 2.0.0 на всех назначенных нодах;
+старые агенты не получают такую конфигурацию. Обычные профили работают без
+изменений, а при обратном переключении цепочка `EZHIKLB-INPUT` удаляется.
 
 При публикации существующего профиля можно включить **«Сбросить распределение
 клиентов»**. Назначенные этому профилю ноды один раз пересоздадут только свои
@@ -259,6 +292,10 @@ sudo systemctl restart ezhiklb ezhiklb-agent
 - Между удалёнными нодами и панелью также рекомендуется HTTPS.
 - Обычный HTTP допустим только в доверенной или тестовой сети и требует явного разрешения.
 - Не публикуйте административный токен и токены нод.
+- Сессия панели — подписанная cookie на 12 часов, не содержащая токена; выход
+  отзывает её. После 10 неудачных входов с одного адреса вход блокируется на
+  10 минут. Изменяющие запросы принимаются только как JSON с той же страницы
+  (защита от CSRF).
 - Регулярно сохраняйте `/etc/ezhiklb`, `/var/lib/ezhiklb` и `/var/lib/ezhiklb-agent`.
 
 ## Документация

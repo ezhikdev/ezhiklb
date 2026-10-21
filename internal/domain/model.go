@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -55,13 +56,58 @@ type Listener struct {
 	AffinitySecs     int        `json:"affinity_seconds"`
 	RateLimitEnabled bool       `json:"rate_limit_enabled,omitempty"`
 	RateLimitMbps    int        `json:"rate_limit_mbps,omitempty"`
-	Backends         []Backend  `json:"backends"`
+	// SNI is the TLS server name a hidden profile routes by. Regular profiles
+	// keep the value so toggling the profile mode does not lose it.
+	SNI      string    `json:"sni,omitempty"`
+	Backends []Backend `json:"backends"`
 }
 
 type ProfileConfig struct {
-	SchemaVersion int         `json:"schema_version"`
-	HealthCheck   HealthCheck `json:"health_check"`
-	Listeners     []Listener  `json:"listeners"`
+	SchemaVersion int  `json:"schema_version"`
+	// Hidden profiles accept TCP on HiddenPorts only, route every connection
+	// by TLS SNI and close the node's other unneeded inbound ports.
+	Hidden      bool        `json:"hidden,omitempty"`
+	HealthCheck HealthCheck `json:"health_check"`
+	Listeners   []Listener  `json:"listeners"`
+}
+
+// HiddenPorts are the TCP ports a hidden profile listens on. Every record is
+// reachable on both of them; the TLS SNI selects the record.
+var HiddenPorts = []uint16{80, 443}
+
+// HiddenMinAgentVersion is the first agent that understands hidden profiles.
+const HiddenMinAgentVersion = "2.0.0"
+
+var sniLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// NormalizeSNI returns the canonical lower-case form used for routing.
+func NormalizeSNI(value string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+}
+
+// ValidSNI accepts a DNS host name or a single leading wildcard label
+// ("*.example.com"). IP literals are rejected: TLS clients never send them.
+func ValidSNI(value string) bool {
+	name := NormalizeSNI(value)
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	name = strings.TrimPrefix(name, "*.")
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if !sniLabelPattern.MatchString(label) {
+			return false
+		}
+	}
+	if _, err := netip.ParseAddr(name); err == nil {
+		return false
+	}
+	// A purely numeric top-level label is never a valid public host name.
+	tld := labels[len(labels)-1]
+	return strings.Trim(tld, "0123456789") != ""
 }
 
 type Profile struct {
@@ -72,8 +118,11 @@ type Profile struct {
 	AutoVersion     bool      `json:"auto_version"`
 	Version         string    `json:"version"`
 	SortOrder       int       `json:"sort_order"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// Hidden and Records summarise the current revision for profile lists.
+	Hidden    bool      `json:"hidden,omitempty"`
+	Records   int       `json:"records"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Revision struct {
@@ -93,6 +142,9 @@ type Node struct {
 	ProfileID       string           `json:"profile_id"`
 	DesiredRevision int64            `json:"desired_revision"`
 	AppliedRevision int64            `json:"applied_revision"`
+	// AppliedProfileID is reported by 2.0+ agents. Revision numbers are per
+	// profile, so the profile is needed to tell whether a node is in sync.
+	AppliedProfileID string          `json:"applied_profile_id,omitempty"`
 	AgentVersion    string           `json:"agent_version"`
 	Status          string           `json:"status"`
 	ApplyState      string           `json:"apply_state"`
@@ -129,7 +181,12 @@ type NodeDiagnostics struct {
 	RateLimitEntries        int       `json:"rate_limit_entries"`
 	RateLimitDrops          uint64    `json:"rate_limit_drops"`
 	RateLimitError          string    `json:"rate_limit_error,omitempty"`
-	CheckedAt               time.Time `json:"checked_at"`
+	// HiddenMode reports that the node applies a hidden profile; the inbound
+	// firewall then has to be in place for the node to be considered healthy.
+	HiddenMode         bool      `json:"hidden_mode,omitempty"`
+	InputFirewallReady bool      `json:"input_firewall_ready,omitempty"`
+	AllowedInputPorts  []uint16  `json:"allowed_input_ports,omitempty"`
+	CheckedAt          time.Time `json:"checked_at"`
 }
 
 type NodeMetrics struct {
@@ -199,6 +256,7 @@ type ServiceStat struct {
 	Protocol        Protocol  `json:"protocol"`
 	ListenAddress   string    `json:"listen_address"`
 	ListenPort      uint16    `json:"listen_port"`
+	SNI             string    `json:"sni,omitempty"`
 	BackendAddress  string    `json:"backend_address,omitempty"`
 	BackendPort     uint16    `json:"backend_port,omitempty"`
 	Connections     uint64    `json:"connections"`
@@ -217,6 +275,7 @@ type TrafficTotal struct {
 	Protocol       Protocol  `json:"protocol,omitempty"`
 	ListenAddress  string    `json:"listen_address,omitempty"`
 	ListenPort     uint16    `json:"listen_port,omitempty"`
+	SNI            string    `json:"sni,omitempty"`
 	IncomingBytes  uint64    `json:"incoming_bytes"`
 	OutgoingBytes  uint64    `json:"outgoing_bytes"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -244,6 +303,7 @@ func (c ProfileConfig) Validate() error {
 
 	listenerIDs := map[string]bool{}
 	serviceKeys := map[string]string{}
+	sniOwners := map[string]string{}
 	for i, listener := range c.Listeners {
 		prefix := fmt.Sprintf("listeners[%d]", i)
 		if strings.TrimSpace(listener.ID) == "" {
@@ -256,13 +316,10 @@ func (c ProfileConfig) Validate() error {
 		if strings.TrimSpace(listener.Name) == "" {
 			problems = append(problems, prefix+".name is required")
 		}
-		if listener.ListenPort == 0 {
-			problems = append(problems, prefix+".listen_port is required")
-		}
-		if listener.ListenAddress != "" && listener.ListenAddress != "0.0.0.0" {
-			if addr, err := netip.ParseAddr(listener.ListenAddress); err != nil || !addr.Is4() {
-				problems = append(problems, prefix+".listen_address must be an IPv4 address")
-			}
+		if c.Hidden {
+			problems = append(problems, validateHiddenListener(prefix, listener, sniOwners)...)
+		} else {
+			problems = append(problems, validateListenerSockets(prefix, listener, serviceKeys)...)
 		}
 		if listener.Scheduler != "wrr" && listener.Scheduler != "rr" {
 			problems = append(problems, prefix+".scheduler must be wrr or rr")
@@ -275,39 +332,6 @@ func (c ProfileConfig) Validate() error {
 		}
 		if !listener.RateLimitEnabled && listener.RateLimitMbps < 0 {
 			problems = append(problems, prefix+".rate_limit_mbps cannot be negative")
-		}
-
-		protocols := map[Protocol]bool{}
-		for _, protocol := range listener.Protocols {
-			if protocol != ProtocolTCP && protocol != ProtocolUDP {
-				problems = append(problems, prefix+".protocols contains an unsupported value")
-				continue
-			}
-			if protocols[protocol] {
-				problems = append(problems, prefix+".protocols contains a duplicate")
-			}
-			protocols[protocol] = true
-			key := fmt.Sprintf("%s:%d/%s", listener.ListenAddress, listener.ListenPort, protocol)
-			if owner, exists := serviceKeys[key]; exists {
-				problems = append(problems, fmt.Sprintf("%s conflicts with listener %s", prefix, owner))
-			}
-			wildcardKey := fmt.Sprintf("0.0.0.0:%d/%s", listener.ListenPort, protocol)
-			if listener.ListenAddress != "0.0.0.0" {
-				if owner, exists := serviceKeys[wildcardKey]; exists {
-					problems = append(problems, fmt.Sprintf("%s conflicts with wildcard listener %s", prefix, owner))
-				}
-			} else {
-				suffix := fmt.Sprintf(":%d/%s", listener.ListenPort, protocol)
-				for existingKey, owner := range serviceKeys {
-					if existingKey != key && strings.HasSuffix(existingKey, suffix) {
-						problems = append(problems, fmt.Sprintf("%s conflicts with listener %s", prefix, owner))
-					}
-				}
-			}
-			serviceKeys[key] = listener.ID
-		}
-		if len(protocols) == 0 {
-			problems = append(problems, prefix+".protocols must contain tcp, udp, or both")
 		}
 
 		backendIDs := map[string]bool{}
@@ -350,6 +374,75 @@ func (c ProfileConfig) Validate() error {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// validateListenerSockets checks the explicit listen socket of a regular
+// profile record and detects address:port:protocol conflicts between records.
+func validateListenerSockets(prefix string, listener Listener, serviceKeys map[string]string) []string {
+	var problems []string
+	if listener.ListenPort == 0 {
+		problems = append(problems, prefix+".listen_port is required")
+	}
+	if listener.ListenAddress != "" && listener.ListenAddress != "0.0.0.0" {
+		if addr, err := netip.ParseAddr(listener.ListenAddress); err != nil || !addr.Is4() {
+			problems = append(problems, prefix+".listen_address must be an IPv4 address")
+		}
+	}
+	protocols := map[Protocol]bool{}
+	for _, protocol := range listener.Protocols {
+		if protocol != ProtocolTCP && protocol != ProtocolUDP {
+			problems = append(problems, prefix+".protocols contains an unsupported value")
+			continue
+		}
+		if protocols[protocol] {
+			problems = append(problems, prefix+".protocols contains a duplicate")
+		}
+		protocols[protocol] = true
+		key := fmt.Sprintf("%s:%d/%s", listener.ListenAddress, listener.ListenPort, protocol)
+		if owner, exists := serviceKeys[key]; exists {
+			problems = append(problems, fmt.Sprintf("%s conflicts with listener %s", prefix, owner))
+		}
+		wildcardKey := fmt.Sprintf("0.0.0.0:%d/%s", listener.ListenPort, protocol)
+		if listener.ListenAddress != "0.0.0.0" {
+			if owner, exists := serviceKeys[wildcardKey]; exists {
+				problems = append(problems, fmt.Sprintf("%s conflicts with wildcard listener %s", prefix, owner))
+			}
+		} else {
+			suffix := fmt.Sprintf(":%d/%s", listener.ListenPort, protocol)
+			for existingKey, owner := range serviceKeys {
+				if existingKey != key && strings.HasSuffix(existingKey, suffix) {
+					problems = append(problems, fmt.Sprintf("%s conflicts with listener %s", prefix, owner))
+				}
+			}
+		}
+		serviceKeys[key] = listener.ID
+	}
+	if len(protocols) == 0 {
+		problems = append(problems, prefix+".protocols must contain tcp, udp, or both")
+	}
+	return problems
+}
+
+// validateHiddenListener checks a hidden-profile record. Its socket is fixed
+// (TCP on HiddenPorts), so only the SNI has to be valid and unique.
+func validateHiddenListener(prefix string, listener Listener, owners map[string]string) []string {
+	var problems []string
+	if !ValidSNI(listener.SNI) {
+		problems = append(problems, prefix+".sni must be a host name such as vpn.example.com or *.example.com")
+	} else {
+		name := NormalizeSNI(listener.SNI)
+		if owner, exists := owners[name]; exists {
+			problems = append(problems, fmt.Sprintf("%s.sni %s is already used by listener %s", prefix, name, owner))
+		}
+		owners[name] = listener.ID
+	}
+	if len(listener.Protocols) != 1 || listener.Protocols[0] != ProtocolTCP {
+		problems = append(problems, prefix+".protocols must be tcp in a hidden profile")
+	}
+	if listener.RateLimitEnabled {
+		problems = append(problems, prefix+".rate_limit is not available in a hidden profile")
+	}
+	return problems
 }
 
 func (c ProfileConfig) HasRateLimits() bool {

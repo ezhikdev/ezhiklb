@@ -51,7 +51,10 @@ type Service struct {
 	ListenerID       string          `json:"listener_id,omitempty"`
 	RateLimitEnabled bool            `json:"rate_limit_enabled,omitempty"`
 	RateLimitMbps    int             `json:"rate_limit_mbps,omitempty"`
-	Destinations     []Destination   `json:"destinations"`
+	// SNI marks a hidden-profile record served by the shared SNI frontend on
+	// domain.HiddenPorts; Port then only labels statistics (443).
+	SNI          string        `json:"sni,omitempty"`
+	Destinations []Destination `json:"destinations"`
 }
 
 type Destination struct {
@@ -63,11 +66,17 @@ type Destination struct {
 
 type AppliedState struct {
 	Revision        int64              `json:"revision"`
+	// ProfileID qualifies Revision, whose numbers are only unique per profile.
+	ProfileID       string             `json:"profile_id,omitempty"`
 	IngressAddress  string             `json:"ingress_address,omitempty"`
 	Services        []Service          `json:"services"`
 	HealthCheck     domain.HealthCheck `json:"health_check"`
 	TrafficControls []TrafficControl   `json:"traffic_controls,omitempty"`
 	DataPlaneVersion string            `json:"data_plane_version,omitempty"`
+	// Hidden and InputPorts describe the inbound firewall of a hidden profile
+	// so it is restored on boot without the panel.
+	Hidden     bool     `json:"hidden,omitempty"`
+	InputPorts []uint16 `json:"input_ports,omitempty"`
 }
 
 type Reconciler struct {
@@ -165,6 +174,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if err := r.applyFirewall(ctx, services); err != nil {
 		return fmt.Errorf("finalize firewall: %w", err)
 	}
+	var inputPorts []uint16
+	if desired.Config.Hidden {
+		ports, err := r.detectInputPorts(ctx)
+		if err == nil {
+			err = r.applyInputFirewall(ctx, ports)
+		}
+		if err != nil {
+			if old.Hidden {
+				_ = r.applyInputFirewall(ctx, old.InputPorts)
+			} else {
+				_ = r.removeInputFirewall(ctx)
+			}
+			_ = r.applyHAProxy(ctx, old.Services)
+			_ = r.applyIPVS(ctx, services, old.Services)
+			_ = r.applyFirewall(ctx, old.Services)
+			return fmt.Errorf("apply hidden profile inbound firewall: %w (previous state restored)", err)
+		}
+		inputPorts = ports
+	} else if old.Hidden {
+		// Only nodes leaving hidden mode ever run inbound firewall commands.
+		if err := r.removeInputFirewall(ctx); err != nil {
+			return fmt.Errorf("remove hidden profile inbound firewall: %w", err)
+		}
+	}
 	controls, trafficErr := r.reconcileTrafficControl(ctx, old.TrafficControls, onlyProtocol(services, domain.ProtocolUDP))
 	if trafficErr != nil {
 		_, rollbackTrafficErr := r.reconcileTrafficControl(ctx, controls, onlyProtocol(old.Services, domain.ProtocolUDP))
@@ -175,7 +208,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 		}
 		return fmt.Errorf("apply rate limit: %w (previous state restored)", trafficErr)
 	}
-	return r.saveState(AppliedState{Revision: desired.Revision, IngressAddress: desired.IngressAddress, Services: services, HealthCheck: desired.Config.HealthCheck, TrafficControls: controls, DataPlaneVersion: "haproxy-tcp"})
+	return r.saveState(AppliedState{Revision: desired.Revision, ProfileID: desired.ProfileID, IngressAddress: desired.IngressAddress, Services: services, HealthCheck: desired.Config.HealthCheck, TrafficControls: controls, DataPlaneVersion: "haproxy-tcp", Hidden: desired.Config.Hidden, InputPorts: inputPorts})
 }
 
 func (r *Reconciler) migrateLegacyTCP(ctx context.Context, state *AppliedState) error {
@@ -256,23 +289,23 @@ func (r *Reconciler) validatePortAvailability(ctx context.Context, services []Se
 		return fmt.Errorf("inspect occupied ports: %w", err)
 	}
 	owned := map[string]bool{}
-	if state, loadErr := r.loadState(); loadErr == nil && state.DataPlaneVersion=="haproxy-tcp" { for _, service := range onlyProtocol(state.Services,domain.ProtocolTCP) { owned[virtualAddress(service)]=true } }
+	if state, loadErr := r.loadState(); loadErr == nil && state.DataPlaneVersion=="haproxy-tcp" { for _, endpoint := range serviceEndpoints(onlyProtocol(state.Services,domain.ProtocolTCP)) { owned[endpoint.String()]=true } }
+	endpoints := serviceEndpoints(services)
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
 			continue
 		}
 		protocol := strings.ToLower(fields[0])
-		endpoint := fields[4]
-		host, port, parseErr := net.SplitHostPort(endpoint)
+		host, port, parseErr := net.SplitHostPort(fields[4])
 		if parseErr != nil {
 			continue
 		}
-		for _, service := range services {
-			if service.Protocol == domain.ProtocolTCP && strings.Contains(line, "haproxy") && owned[virtualAddress(service)] { continue }
-			addressConflict := host == service.Address || host == "0.0.0.0" || host == "*" || host == "::"
-			if protocol == string(service.Protocol) && port == strconv.Itoa(int(service.Port)) && addressConflict {
-				return fmt.Errorf("port conflict: %s %s:%d is occupied by %s", strings.ToUpper(protocol), service.Address, service.Port, strings.TrimSpace(line))
+		for _, endpoint := range endpoints {
+			if endpoint.protocol == domain.ProtocolTCP && strings.Contains(line, "haproxy") && owned[endpoint.String()] { continue }
+			addressConflict := host == endpoint.address || host == "0.0.0.0" || host == "*" || host == "::"
+			if protocol == string(endpoint.protocol) && port == strconv.Itoa(int(endpoint.port)) && addressConflict {
+				return fmt.Errorf("port conflict: %s %s is occupied by %s", strings.ToUpper(protocol), endpoint, strings.TrimSpace(line))
 			}
 		}
 	}
@@ -315,6 +348,17 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 	if len(onlyProtocol(state.Services, domain.ProtocolTCP)) > 0 {
 		if err := r.applyHAProxy(ctx, state.Services); err != nil { return 0, fmt.Errorf("restore HAProxy: %w", err) }
 	}
+	if state.Hidden {
+		// Services such as sshd may still be starting: keep the saved ports
+		// open too. EnsureInputFirewall drops stale ones a minute later.
+		ports := append(append([]uint16(nil), state.InputPorts...), baseHiddenInputPorts...)
+		if detected, err := r.detectInputPorts(ctx); err == nil {
+			ports = append(ports, detected...)
+		}
+		ports = normalizePorts(ports)
+		if err := r.applyInputFirewall(ctx, ports); err != nil { return 0, fmt.Errorf("restore hidden profile inbound firewall: %w", err) }
+		state.InputPorts = ports
+	}
 	controls, err := r.reconcileTrafficControl(ctx, state.TrafficControls, onlyProtocol(state.Services, domain.ProtocolUDP))
 	if err != nil {
 		return 0, fmt.Errorf("restore rate limits: %w", err)
@@ -324,6 +368,18 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return state.Revision, nil
+}
+
+// RestoredProfileID returns the profile of the last applied revision; it is
+// empty for state written by 1.x agents.
+func (r *Reconciler) RestoredProfileID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, err := r.loadState()
+	if err != nil {
+		return ""
+	}
+	return state.ProfileID
 }
 
 func (r *Reconciler) RestoredIngressAddress() string {
@@ -391,6 +447,11 @@ func (r *Reconciler) Decommission(ctx context.Context) error {
 	if err := r.removeFirewall(ctx); err != nil {
 		return fmt.Errorf("remove EzhikLB firewall rules: %w", err)
 	}
+	if old.Hidden {
+		if err := r.removeInputFirewall(ctx); err != nil {
+			return fmt.Errorf("remove hidden profile inbound firewall: %w", err)
+		}
+	}
 	if _, err := r.reconcileTrafficControl(ctx, old.TrafficControls, nil); err != nil {
 		return fmt.Errorf("remove rate limits: %w", err)
 	}
@@ -407,17 +468,21 @@ func (r *Reconciler) removeFirewall(ctx context.Context) error {
 }
 
 func (r *Reconciler) removeManagedChain(ctx context.Context, table, parent, child string) error {
+	return r.removeManagedChainWith(ctx, "iptables", table, parent, child)
+}
+
+func (r *Reconciler) removeManagedChainWith(ctx context.Context, binary, table, parent, child string) error {
 	prefix := []string{"-w", "5", "-t", table}
 	check := append(append([]string{}, prefix...), "-C", parent, "-j", child)
-	if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
+	if _, err := r.runner.Run(ctx, binary, check, ""); err == nil {
 		remove := append(append([]string{}, prefix...), "-D", parent, "-j", child)
-		if _, err := r.runner.Run(ctx, "iptables", remove, ""); err != nil {
+		if _, err := r.runner.Run(ctx, binary, remove, ""); err != nil {
 			return err
 		}
 	}
 	for _, action := range []string{"-F", "-X"} {
-		if _, err := r.runner.Run(ctx, "iptables", append(append([]string{}, prefix...), action, child), ""); err != nil {
-			output, inspectErr := r.runner.Run(ctx, "iptables", append(append([]string{}, prefix...), "-S"), "")
+		if _, err := r.runner.Run(ctx, binary, append(append([]string{}, prefix...), action, child), ""); err != nil {
+			output, inspectErr := r.runner.Run(ctx, binary, append(append([]string{}, prefix...), "-S"), "")
 			if inspectErr != nil {
 				return fmt.Errorf("verify firewall cleanup: %w", inspectErr)
 			}
@@ -488,6 +553,21 @@ func compileServices(config domain.ProfileConfig, vip string) []Service {
 	var result []Service
 	for _, listener := range config.Listeners {
 		if !listener.Enabled {
+			continue
+		}
+		if config.Hidden {
+			// Hidden records always listen on the node's ingress address; the
+			// shared SNI frontend serves them on every domain.HiddenPorts port.
+			service := Service{Protocol: domain.ProtocolTCP, Address: vip, Port: domain.HiddenPorts[len(domain.HiddenPorts)-1], Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs, ListenerID: listener.ID, SNI: domain.NormalizeSNI(listener.SNI)}
+			for _, backend := range listener.Backends {
+				if backend.Enabled {
+					service.Destinations = append(service.Destinations, Destination{ID: backend.ID, Address: backend.Address, Port: backend.Port, Weight: backend.Weight})
+				}
+			}
+			sort.Slice(service.Destinations, func(i, j int) bool {
+				return destinationKey(service.Destinations[i]) < destinationKey(service.Destinations[j])
+			})
+			result = append(result, service)
 			continue
 		}
 		for _, protocol := range listener.Protocols {
@@ -634,6 +714,10 @@ const (
 	nfConntrackMaxEntries = 2000000
 )
 
+// optionalSysctls may be read-only inside containers without breaking the
+// data plane.
+var optionalSysctls = map[string]bool{"net.netfilter.nf_conntrack_max": true}
+
 func (r *Reconciler) configureKernel(ctx context.Context) error {
 	values := map[string]string{
 		"net.ipv4.ip_forward":                           "1",
@@ -652,6 +736,13 @@ func (r *Reconciler) configureKernel(ctx context.Context) error {
 	sort.Strings(keys)
 	for _, key := range keys {
 		if _, err := r.runner.Run(ctx, "sysctl", []string{"-w", key + "=" + values[key]}, ""); err != nil {
+			if optionalSysctls[key] {
+				// Container and LXC network namespaces expose this host-wide
+				// table size read-only. It only sizes the table; forwarding
+				// works with the host's value.
+				r.logger.Warn("optional kernel setting was not applied", "key", key, "error", err)
+				continue
+			}
 			return err
 		}
 	}
@@ -722,16 +813,20 @@ func (r *Reconciler) applyFirewall(ctx context.Context, services []Service) erro
 }
 
 func (r *Reconciler) ensureJump(ctx context.Context, table, parent, child string) error {
+	return r.ensureJumpWith(ctx, "iptables", table, parent, child)
+}
+
+func (r *Reconciler) ensureJumpWith(ctx context.Context, binary, table, parent, child string) error {
 	args := []string{"-w", "5"}
 	if table != "filter" {
 		args = append(args, "-t", table)
 	}
 	check := append(append([]string{}, args...), "-C", parent, "-j", child)
-	if _, err := r.runner.Run(ctx, "iptables", check, ""); err == nil {
+	if _, err := r.runner.Run(ctx, binary, check, ""); err == nil {
 		return nil
 	}
 	insert := append(append([]string{}, args...), "-I", parent, "1", "-j", child)
-	_, err := r.runner.Run(ctx, "iptables", insert, "")
+	_, err := r.runner.Run(ctx, binary, insert, "")
 	return err
 }
 
@@ -793,6 +888,9 @@ func (r *Reconciler) saveState(state AppliedState) error {
 }
 
 func serviceKey(service Service) string {
+	if service.SNI != "" {
+		return fmt.Sprintf("%s/%s:%d#%s", service.Protocol, service.Address, service.Port, service.SNI)
+	}
 	return fmt.Sprintf("%s/%s:%d", service.Protocol, service.Address, service.Port)
 }
 func destinationKey(destination Destination) string {

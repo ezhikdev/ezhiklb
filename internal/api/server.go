@@ -28,6 +28,8 @@ type Server struct {
 	logger     *slog.Logger
 	settings   domain.SystemSettings
 	restart    func()
+	sessions   *sessions
+	logins     *loginLimiter
 }
 
 type Options struct {
@@ -53,7 +55,7 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	if opts.Settings.AgentPort == 0 {
 		opts.Settings.AgentPort = 8081
 	}
-	return &Server{store: st, adminToken: opts.AdminToken, agentToken: opts.AgentToken, secure: opts.Secure, webDir: opts.WebDir, logger: opts.Logger, settings: opts.Settings, restart: opts.Restart}, nil
+	return &Server{store: st, adminToken: opts.AdminToken, agentToken: opts.AgentToken, secure: opts.Secure, webDir: opts.WebDir, logger: opts.Logger, settings: opts.Settings, restart: opts.Restart, sessions: newSessions(opts.AdminToken), logins: newLoginLimiter()}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -123,21 +125,37 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Token string `json:"token"`
 	}
+	client := clientAddress(r)
+	if s.logins.blocked(client) {
+		writeError(w, http.StatusTooManyRequests, "too_many_attempts", "Слишком много неудачных попыток входа. Повторите через 10 минут")
+		return
+	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	if !sameSecret(body.Token, s.adminToken) {
+		s.logins.fail(client)
+		s.logger.Warn("failed administrator login", "client", client)
 		time.Sleep(250 * time.Millisecond)
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid administrator token")
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Неверный токен администратора")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "ezhiklb_session", Value: s.adminToken, Path: "/", HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 60 * 60})
+	s.logins.succeed(client)
+	session, err := s.sessions.issue()
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: session, Path: "/", HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteStrictMode, MaxAge: int(sessionTTL.Seconds())})
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
-func (s *Server) logout(w http.ResponseWriter, _ *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "ezhiklb_session", Value: "", Path: "/", HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		s.sessions.revoke(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -263,7 +281,7 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
 		return
 	}
-	if errors.Is(err, store.ErrRateLimitUnsupported) {
+	if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) {
 		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
 		return
 	}
@@ -591,7 +609,7 @@ func (s *Server) assignProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.AssignProfile(r.Context(), r.PathValue("id"), body.ProfileID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node or profile not found")
-	} else if errors.Is(err, store.ErrRateLimitUnsupported) {
+	} else if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) {
 		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
 	} else if err != nil {
 		s.internalError(w, err)
@@ -645,11 +663,23 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	if state.Config.HasRateLimits() && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(r.Header.Get("X-EzhikLB-Agent-Version"), "1.1.0") < 0 {
+	agentVersion := r.Header.Get("X-EzhikLB-Agent-Version")
+	if state.Config.HasRateLimits() && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(agentVersion, "1.1.0") < 0 {
 		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до 1.1.0 перед применением ограничения скорости")
 		return
 	}
-	etag := fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce, state.IngressAddress)
+	// Older agents would apply a hidden profile as ordinary listeners on 443
+	// without SNI routing or the inbound firewall: refuse instead.
+	if state.Config.Hidden && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(agentVersion, domain.HiddenMinAgentVersion) < 0 {
+		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до "+domain.HiddenMinAgentVersion+" перед применением скрытого профиля")
+		return
+	}
+	etag := DesiredStateETag(state)
+	if domain.CompareVersions(agentVersion, "2.0.0") < 0 {
+		// 1.x agents build their If-None-Match without the profile ID; keep
+		// their format so unchanged polls stay 304 responses.
+		etag = fmt.Sprintf(`"rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce, state.IngressAddress)
+	}
 	if state.Decommission {
 		etag = fmt.Sprintf(`"rev-%d-probe-%d-decommission"`, state.Revision, state.HealthProbe)
 	}
@@ -661,10 +691,19 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, state)
 }
 
+// DesiredStateETag identifies a desired state. Revision numbers are only
+// unique within a profile, so the profile ID is part of the tag: switching
+// to another profile with the same revision number must reach the agent.
+// The agent computes the same tag from what it has applied.
+func DesiredStateETag(state domain.NodeDesiredState) string {
+	return fmt.Sprintf(`"profile-%s-rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, state.ProfileID, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce, state.IngressAddress)
+}
+
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Version         string                 `json:"version"`
-		AppliedRevision int64                  `json:"applied_revision"`
+		Version          string                 `json:"version"`
+		AppliedRevision  int64                  `json:"applied_revision"`
+		AppliedProfileID string                 `json:"applied_profile_id"`
 		ApplyError      string                 `json:"apply_error"`
 		ApplyState      string                 `json:"apply_state"`
 		Health          []domain.BackendHealth `json:"health"`
@@ -684,7 +723,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.PathValue("id") == "local" && (observedAddress == "127.0.0.1" || observedAddress == "::1") {
 		observedAddress = ""
 	}
-	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Diagnostics, body.UpdateState, body.UpdateError, body.RestartAck, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
+	if err := s.store.Heartbeat(r.Context(), r.PathValue("id"), body.Version, observedAddress, body.ApplyState, body.AppliedRevision, body.AppliedProfileID, body.ApplyError, body.Health, body.Stats, body.Metrics, body.Diagnostics, body.UpdateState, body.UpdateError, body.RestartAck, body.Decommissioned); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node not found")
 	} else if err != nil {
 		s.internalError(w, err)
@@ -695,11 +734,16 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) admin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, _ := r.Cookie("ezhiklb_session")
-		if cookie == nil || !sameSecret(cookie.Value, s.adminToken) {
+		cookie, _ := r.Cookie(sessionCookie)
+		if cookie == nil || !s.sessions.valid(cookie.Value) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 			return
 		}
+		if !sameOriginRequest(r) {
+			writeError(w, http.StatusForbidden, "cross_site_request", "Cross-site request refused")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -817,6 +861,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "1.2.2"
+const Version = "2.0.0"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

@@ -64,7 +64,7 @@ func TestTrafficAccountingAccumulatesDeltasAndResets(t *testing.T) {
 	heartbeat := func(incoming,outgoing uint64) {
 		stats := []domain.ServiceStat{{Protocol:domain.ProtocolUDP,ListenAddress:"198.51.100.10",ListenPort:8002,IncomingBytes:incoming,OutgoingBytes:outgoing,CollectedAt:time.Now().UTC()}}
 		metrics := domain.NodeMetrics{CollectedAt:time.Now().UTC()}
-		if err := s.Heartbeat(ctx,"local","1.2.0","","applied",1,"",nil,stats,metrics,domain.NodeDiagnostics{},"idle","",0,false); err != nil { t.Fatal(err) }
+		if err := s.Heartbeat(ctx,"local","1.2.0","","applied",1,"","",nil,stats,metrics,domain.NodeDiagnostics{},"idle","",0,false); err != nil { t.Fatal(err) }
 	}
 	heartbeat(100,200); heartbeat(160,260)
 	nodes, err := s.ListNodes(ctx); if err != nil { t.Fatal(err) }
@@ -192,7 +192,7 @@ func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", 0, false); err != nil {
+	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.2", "", "applied", 1, "", "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "", "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	nodes, err := s.ListNodes(ctx)
@@ -208,7 +208,7 @@ func TestLegacyHeartbeatDoesNotEraseUpdateRequest(t *testing.T) {
 	if err := s.RequestNodeUpdate(ctx, "local", "0.1.0-beta.3.3"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, false); err != nil {
+	if err := s.Heartbeat(ctx, "local", "0.1.0-beta.3.3", "", "applied", 1, "", "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	nodes, err = s.ListNodes(ctx)
@@ -251,7 +251,7 @@ func TestPublishedResetIsOneShotAndRequiresCompatibleAgents(t *testing.T) {
 	if !desired.ResetConnections {
 		t.Fatal("published reset was not delivered to assigned node")
 	}
-	if err := s.Heartbeat(ctx, "local", "1.0.7", "", "applied", revision.Number, "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, false); err != nil {
+	if err := s.Heartbeat(ctx, "local", "1.0.7", "", "applied", revision.Number, "", "", nil, nil, domain.NodeMetrics{}, domain.NodeDiagnostics{}, "idle", "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	desired, err = s.DesiredState(ctx, "local")

@@ -19,6 +19,9 @@ import (
 
 const haProxySocket = "/run/ezhiklb-haproxy/admin.sock"
 
+// haProxyMaxConn bounds concurrent TCP sessions per node (~35 MB per process).
+const haProxyMaxConn = 200000
+
 func onlyProtocol(services []Service, protocol domain.Protocol) []Service {
 	result := make([]Service, 0)
 	for _, service := range services {
@@ -36,14 +39,27 @@ func safeHAProxyName(value string) string {
 	return b.String()
 }
 
-func renderHAProxyConfig(services []Service) string {
+// renderHAProxyConfig renders every TCP service. rejectCertificate is the
+// placeholder used by the hidden-profile TLS reject listener; it is only
+// referenced when SNI services are present.
+func renderHAProxyConfig(services []Service, rejectCertificate string) string {
 	var b strings.Builder
 	// Let HAProxy choose kernel splicing for bulk TCP streams. Session logs,
 	// counters, weights and source affinity still use the same L4 proxy path.
-	b.WriteString("global\n  log stdout format raw local0\n  user haproxy\n  group haproxy\n  stats socket " + haProxySocket + " user root group root mode 600 level admin\n\ndefaults\n  mode tcp\n  log global\n  option tcplog\n  option splice-auto\n  timeout connect 5s\n  timeout client 1h\n  timeout server 1h\n  timeout check 3s\n\n")
-	for _, service := range onlyProtocol(services, domain.ProtocolTCP) {
+	// An explicit maxconn sizes HAProxy's file-descriptor tables. Derived from
+	// the unit's LimitNOFILE=1048576 it costs ~70 MB per process, and every
+	// worker generation still draining long VPN sessions after a reload keeps
+	// its own copy — enough to exhaust a 1 GB node.
+	b.WriteString("global\n  log stdout format raw local0\n  user haproxy\n  group haproxy\n  maxconn " + strconv.Itoa(haProxyMaxConn) + "\n  stats socket " + haProxySocket + " user root group root mode 600 level admin\n\ndefaults\n  mode tcp\n  log global\n  option tcplog\n  option splice-auto\n  timeout connect 5s\n  timeout client 1h\n  timeout server 1h\n  timeout check 3s\n\n")
+	tcp := onlyProtocol(services, domain.ProtocolTCP)
+	if hidden := hiddenServices(tcp); len(hidden) > 0 {
+		renderSNIFrontend(&b, hidden, rejectCertificate)
+	}
+	for _, service := range tcp {
 		name := safeHAProxyName(service.ListenerID)
-		fmt.Fprintf(&b, "frontend fe_%s\n  bind %s:%d\n  default_backend be_%s\n\n", name, service.Address, service.Port, name)
+		if service.SNI == "" {
+			fmt.Fprintf(&b, "frontend fe_%s\n  bind %s:%d\n  default_backend be_%s\n\n", name, service.Address, service.Port, name)
+		}
 		fmt.Fprintf(&b, "backend be_%s\n  balance %s\n", name, map[string]string{"rr":"roundrobin", "wrr":"roundrobin"}[service.Scheduler])
 		if service.AffinitySecs > 0 {
 			fmt.Fprintf(&b, "  stick-table type ip size 1m expire %ds\n  stick on src\n", service.AffinitySecs)
@@ -88,7 +104,11 @@ func (r *Reconciler) applyHAProxy(ctx context.Context, services []Service) error
 		}
 		return nil
 	}
-	config := renderHAProxyConfig(services)
+	rejectCertificate := r.sniRejectCertificatePath()
+	if len(hiddenServices(services)) > 0 {
+		if err := ensureRejectCertificate(rejectCertificate); err != nil { return fmt.Errorf("prepare SNI reject certificate: %w", err) }
+	}
+	config := renderHAProxyConfig(services, rejectCertificate)
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil { return err }
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(config), 0640); err != nil { return err }
@@ -158,7 +178,7 @@ func parseHAProxyStats(input io.Reader, services []Service) ([]domain.ServiceSta
 		if !ok { continue }
 		sv := value(row, "svname")
 		if sv != "BACKEND" && !strings.HasPrefix(sv, "srv_") { continue }
-		stat := domain.ServiceStat{Protocol: domain.ProtocolTCP, ListenAddress: service.Address, ListenPort: service.Port, Connections: parse(row, "stot"), IncomingBytes: parse(row, "bin"), OutgoingBytes: parse(row, "bout"), CollectedAt: now}
+		stat := domain.ServiceStat{Protocol: domain.ProtocolTCP, ListenAddress: service.Address, ListenPort: service.Port, SNI: service.SNI, Connections: parse(row, "stot"), IncomingBytes: parse(row, "bin"), OutgoingBytes: parse(row, "bout"), CollectedAt: now}
 		if sv != "BACKEND" {
 			destination, ok := byServer[value(row, "pxname")][sv]
 			if !ok { continue }

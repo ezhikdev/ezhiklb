@@ -1,0 +1,101 @@
+/* EzhikLB 2.0 design tokens, shared with Ezhik Guard: cool off-white and
+   near-black surfaces, periwinkle accents, dotted textures, pill controls.
+   Both themes use the same hues; theme.js sets data-theme before paint. */
+
+:root {
+  --font: "Geist Variable", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+  --spring: cubic-bezier(.3, 1.12, .45, 1);
+  --radius: 18px;
+  --radius-sm: 12px;
+  --sidebar-w: 252px;
+  font-synthesis: none;
+}
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #edeff3;
+  --surface: #ffffff;
+  --surface-raised: #f6f7fa;
+  --surface-hover: #eef1f6;
+  --surface-sunken: #f3f5f8;
+  --foreground: #12141a;
+  --muted: #4b5165;
+  --quiet: #6b7186;
+  --placeholder: #9aa0b2;
+  --border: rgba(18, 20, 26, .08);
+  --border-strong: rgba(18, 20, 26, .16);
+  --dot: rgba(52, 62, 94, .16);
+
+  --accent: #14161d;
+  --accent-ink: #ffffff;
+  --accent-hover: #2b2f3c;
+  --accent-glow: #4c5e96;
+  --peri: #4c5e96;
+  --peri-soft: #e1e7f4;
+  --peri-ink: #2f3c66;
+
+  --success: #23885c;
+  --warning: #a96a06;
+  --danger: #c43d3d;
+
+  --overlay: #12141a;
+  --shade: #1f2640;
+  --input-bg: #f6f7fa;
+  --input-bg-focus: #ffffff;
+  --glass: rgba(255, 255, 255, .78);
+  --popover: #ffffff;
+  --dialog-bg: #ffffff;
+  --code-bg: #f3f5f8;
+  --scrim: rgba(20, 24, 38, .38);
+  --glow-a: rgba(175, 192, 226, .55);
+  --glow-b: rgba(52, 62, 94, .14);
+  --logo-filter: none;
+  --shadow-sm: 0 1px 2px rgba(18, 20, 26, .04), 0 8px 24px -12px rgba(52, 62, 94, .18);
+  --shadow: 0 24px 60px -24px rgba(31, 38, 64, .35);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0a0b0f;
+  --surface: #111319;
+  --surface-raised: #161922;
+  --surface-hover: #1b1f2a;
+  --surface-sunken: #0d0f14;
+  --foreground: #eceef4;
+  --muted: #a6acbd;
+  --quiet: #7d8397;
+  --placeholder: #545a6c;
+  --border: rgba(255, 255, 255, .07);
+  --border-strong: rgba(255, 255, 255, .15);
+  --dot: rgba(175, 192, 226, .13);
+
+  --accent: #eef1f7;
+  --accent-ink: #0b0c10;
+  --accent-hover: #ffffff;
+  --accent-glow: #c3d0ee;
+  --peri: #9fb2de;
+  --peri-soft: rgba(159, 178, 222, .12);
+  --peri-ink: #c9d5f1;
+
+  --success: #4cc38a;
+  --warning: #e7b04a;
+  --danger: #f07171;
+
+  --overlay: #ffffff;
+  --shade: #000000;
+  --input-bg: #0d0f14;
+  --input-bg-focus: #11141b;
+  --glass: rgba(17, 19, 25, .78);
+  --popover: #161922;
+  --dialog-bg: #111319;
+  --code-bg: #08090c;
+  --scrim: rgba(3, 4, 8, .66);
+  --glow-a: rgba(80, 98, 160, .3);
+  --glow-b: rgba(159, 178, 222, .08);
+  --logo-filter: invert(1) brightness(.96);
+  --shadow-sm: 0 1px 0 rgba(255, 255, 255, .03) inset, 0 10px 30px -18px rgba(0, 0, 0, .9);
+  --shadow: 0 30px 80px -30px rgba(0, 0, 0, .95);
+}

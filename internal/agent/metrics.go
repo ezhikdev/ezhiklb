@@ -125,6 +125,15 @@ func readLoad(path string) float64 {
 	value, _ := strconv.ParseFloat(fields[0], 64); return value
 }
 
+// ipvsConnAddress converts the hexadecimal IPv4 of /proc/net/ip_vs_conn to the
+// dotted form HAProxy reports, so a client seen by both counts once.
+func ipvsConnAddress(value string) string {
+	if len(value) != 8 { return value }
+	number, err := strconv.ParseUint(value, 16, 32)
+	if err != nil { return value }
+	return fmt.Sprintf("%d.%d.%d.%d", byte(number>>24), byte(number>>16), byte(number>>8), byte(number))
+}
+
 func readActiveIPVSClients(path string) []string {
 	file, err := os.Open(path); if err != nil { return nil }; defer file.Close()
 	unique := make(map[string]struct{})
@@ -132,7 +141,7 @@ func readActiveIPVSClients(path string) []string {
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 2 || (fields[0] != "TCP" && fields[0] != "UDP") { continue }
-		unique[fields[1]] = struct{}{}
+		unique[ipvsConnAddress(fields[1])] = struct{}{}
 	}
 	result := make([]string, 0, len(unique)); for address := range unique { result = append(result, address) }; return result
 }

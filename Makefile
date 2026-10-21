@@ -1,4 +1,4 @@
-VERSION ?= 1.2.2
+VERSION ?= 2.0.0
 DIST := $(CURDIR)/dist
 
 .PHONY: build web clean bundle
@@ -12,7 +12,7 @@ build: web
 	chmod +x $(DIST)/install.sh
 
 web:
-	cd web && npm install && npm run build
+	cd web && npm ci && npm run build
 	mkdir -p $(DIST)/web
 	cp -a web/dist/. $(DIST)/web/
 
