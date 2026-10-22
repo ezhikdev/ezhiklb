@@ -17,7 +17,8 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const haProxySocket = "/run/ezhiklb-haproxy/admin.sock"
+// haProxySocket is a variable only so tests can point it at a fake socket.
+var haProxySocket = "/run/ezhiklb-haproxy/admin.sock"
 
 // haProxyMaxConn bounds concurrent TCP sessions per node (~35 MB per process).
 const haProxyMaxConn = 200000
@@ -44,13 +45,17 @@ func safeHAProxyName(value string) string {
 // referenced when SNI services are present.
 func renderHAProxyConfig(services []Service, rejectCertificate string) string {
 	var b strings.Builder
-	// Let HAProxy choose kernel splicing for bulk TCP streams. Session logs,
-	// counters, weights and source affinity still use the same L4 proxy path.
+	// Let HAProxy choose kernel splicing for bulk TCP streams. Counters,
+	// weights and source affinity still use the same L4 proxy path.
 	// An explicit maxconn sizes HAProxy's file-descriptor tables. Derived from
 	// the unit's LimitNOFILE=1048576 it costs ~70 MB per process, and every
 	// worker generation still draining long VPN sessions after a reload keeps
 	// its own copy — enough to exhaust a 1 GB node.
-	b.WriteString("global\n  log stdout format raw local0\n  user haproxy\n  group haproxy\n  maxconn " + strconv.Itoa(haProxyMaxConn) + "\n  stats socket " + haProxySocket + " user root group root mode 600 level admin\n\ndefaults\n  mode tcp\n  log global\n  option tcplog\n  option splice-auto\n  timeout connect 5s\n  timeout client 1h\n  timeout server 1h\n  timeout check 3s\n\n")
+	// No per-connection log: VPN clients open hundreds of short connections
+	// per second, and every line went HAProxy -> journald -> rsyslog -> disk,
+	// costing CPU, iowait and gigabytes of syslog nobody reads. Startup and
+	// configuration alerts still reach the journal through stderr.
+	b.WriteString("global\n  user haproxy\n  group haproxy\n  maxconn " + strconv.Itoa(haProxyMaxConn) + "\n  stats socket " + haProxySocket + " user root group root mode 600 level admin\n\ndefaults\n  mode tcp\n  option splice-auto\n  timeout connect 5s\n  timeout client 1h\n  timeout server 1h\n  timeout check 3s\n\n")
 	tcp := onlyProtocol(services, domain.ProtocolTCP)
 	if hidden := hiddenServices(tcp); len(hidden) > 0 {
 		renderSNIFrontend(&b, hidden, rejectCertificate)
@@ -109,12 +114,37 @@ func (r *Reconciler) applyHAProxy(ctx context.Context, services []Service) error
 		if err := ensureRejectCertificate(rejectCertificate); err != nil { return fmt.Errorf("prepare SNI reject certificate: %w", err) }
 	}
 	config := renderHAProxyConfig(services, rejectCertificate)
+	if current, err := os.ReadFile(path); err == nil && string(current) == config && r.haProxyActive(ctx) {
+		// Same config already running (agent restart, UDP-only or reset
+		// publication): a reload would only leave one more worker generation
+		// draining long sessions. Re-sync the runtime weights a reload would
+		// have reset; the health monitor re-asserts down backends on its
+		// next check, exactly as after a reload.
+		err := syncHAProxyWeights(services)
+		if err == nil { return nil }
+		r.logger.Warn("HAProxy weight sync failed, reloading instead", "error", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil { return err }
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(config), 0640); err != nil { return err }
 	if _, err := r.runner.Run(ctx, "haproxy", []string{"-c", "-f", tmp}, ""); err != nil { _ = os.Remove(tmp); return fmt.Errorf("validate HAProxy config: %w", err) }
 	if err := os.Rename(tmp, path); err != nil { return err }
 	if _, err := r.runner.Run(ctx, "systemctl", []string{"reload-or-restart", "ezhiklb-haproxy.service"}, ""); err != nil { return fmt.Errorf("reload HAProxy: %w", err) }
+	return nil
+}
+
+func (r *Reconciler) haProxyActive(ctx context.Context) bool {
+	_, err := r.runner.Run(ctx, "systemctl", []string{"is-active", "--quiet", "ezhiklb-haproxy.service"}, "")
+	return err == nil
+}
+
+// syncHAProxyWeights restores every TCP server to its configured weight.
+func syncHAProxyWeights(services []Service) error {
+	for _, service := range onlyProtocol(services, domain.ProtocolTCP) {
+		for _, destination := range service.Destinations {
+			if err := setHAProxyServerWeight(service, destination, destination.Weight); err != nil { return err }
+		}
+	}
 	return nil
 }
 
@@ -199,31 +229,58 @@ func CollectDataPlaneStats(ctx context.Context, runner Runner, services []Servic
 	return result, nil
 }
 
-func readActiveHAProxyClients() []string {
-	conn, err := openHAProxyCommand("show sess")
+// readActiveTCPClients lists client IPs of established sessions on the TCP
+// listeners. It asks the kernel (ss with an in-kernel filter on the listener
+// address/port) instead of HAProxy's "show sess", which dumps every session
+// while all HAProxy threads are paused — a visible stall every scan on a node
+// with tens of thousands of sessions.
+func readActiveTCPClients(ctx context.Context, runner Runner, services []Service) []string {
+	args := activeTCPClientsArgs(services)
+	if args == nil { return nil }
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	output, err := runner.Run(ctx, "ss", args, "")
 	if err != nil { return nil }
-	defer conn.Close()
-	clients, err := parseActiveHAProxyClients(conn)
+	clients, err := parseSocketPeers(strings.NewReader(output))
 	if err != nil { return nil }
 	return clients
 }
 
-func parseActiveHAProxyClients(input io.Reader) ([]string, error) {
-	unique := map[string]struct{}{}
-	scanner := bufio.NewScanner(input)
-	// Default show sess emits one summary line per session, not payloads.
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	for scanner.Scan() {
-		for field := range strings.FieldsSeq(scanner.Text()) {
-			if !strings.HasPrefix(field, "src=") { continue }
-			value := strings.TrimPrefix(strings.TrimSuffix(field, "]"), "src=")
-			if host, _, splitErr := net.SplitHostPort(value); splitErr == nil {
-				if _, exists := unique[host]; !exists { unique[strings.Clone(host)] = struct{}{} }
-			}
-			break
-		}
+func activeTCPClientsArgs(services []Service) []string {
+	seen := map[string]bool{}
+	var filter []string
+	add := func(address string, port uint16) {
+		expression := "src " + net.JoinHostPort(address, strconv.Itoa(int(port)))
+		if ip := net.ParseIP(address); ip == nil || ip.IsUnspecified() { expression = "sport = :" + strconv.Itoa(int(port)) }
+		if seen[expression] { return }
+		seen[expression] = true
+		if len(filter) > 0 { filter = append(filter, "or") }
+		filter = append(filter, strings.Fields(expression)...)
 	}
-	if err := scanner.Err(); err != nil { return nil, err }
-	result := make([]string,0,len(unique)); for address := range unique { result=append(result,address) }; return result, nil
+	for _, service := range onlyProtocol(services, domain.ProtocolTCP) {
+		if service.SNI != "" {
+			for _, port := range domain.HiddenPorts { add(service.Address, port) }
+			continue
+		}
+		add(service.Address, service.Port)
+	}
+	if len(filter) == 0 { return nil }
+	return append(append([]string{"-H", "-t", "-n", "state", "established", "("}, filter...), ")")
 }
 
+// parseSocketPeers reads `ss -H` rows (Recv-Q Send-Q Local Peer) and returns
+// the unique peer addresses.
+func parseSocketPeers(input io.Reader) ([]string, error) {
+	unique := map[string]struct{}{}
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 4 { continue }
+		host, _, err := net.SplitHostPort(fields[3])
+		if err != nil { continue }
+		host = strings.TrimPrefix(host, "::ffff:")
+		if _, exists := unique[host]; !exists { unique[strings.Clone(host)] = struct{}{} }
+	}
+	if err := scanner.Err(); err != nil { return nil, err }
+	result := make([]string, 0, len(unique)); for address := range unique { result = append(result, address) }; return result, nil
+}

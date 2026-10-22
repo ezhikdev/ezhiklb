@@ -16,7 +16,7 @@ const nav = [
 const navSections = [["monitor", "Мониторинг"], ["manage", "Управление"]] as const
 
 const emptyConfig = (): ProfileConfig => ({ schema_version: 1, health_check: { enabled: true, interval_seconds: 10, timeout_millis: 1000, failure_threshold: 3, recovery_threshold: 2 }, listeners: [] })
-const releaseVersion = "2.0.1"
+const releaseVersion = "2.0.2"
 const resetMinAgentVersion = "1.0.7"
 const rateLimitMinAgentVersion = "1.1.0"
 const hiddenMinAgentVersion = "2.0.0"

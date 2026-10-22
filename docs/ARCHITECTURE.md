@@ -36,7 +36,12 @@ Each enabled UDP listener becomes one IPVS virtual service. Backends keep IPVS
 NAT mode and may have a destination port different from the listen port. TCP
 listeners are rendered into an isolated HAProxy layer-4 configuration managed
 by `ezhiklb-haproxy.service`; the distribution package's own
-`haproxy.service` and `/etc/haproxy/haproxy.cfg` are never modified. The agent
+`haproxy.service` and `/etc/haproxy/haproxy.cfg` are never modified.
+Since 2.0.2 the generated config has no per-connection log (VPN clients open
+hundreds of connections per second; the log chain cost CPU and disk), an
+unchanged config is not reloaded (runtime weights are re-synced over the admin
+socket instead, so no extra worker generation is left draining), and active
+client IPs are read from the kernel with `ss` instead of HAProxy `show sess`. The agent
 owns only IPVS services recorded in its state file and never calls
 `ipvsadm -C`.
 
@@ -164,6 +169,17 @@ this is global kernel state for the whole node (`ipvsadm --set` has no
 per-listener granularity), not derived from any specific listener's own
 Affinity value — Affinity itself still governs which backend a client is
 routed back to.
+
+### Receive steering (2.0.2)
+
+`configureKernel` also calls `tuneReceiveSteering` (`internal/agent/rps.go`).
+A single-queue VPS NIC raises one RX interrupt pinned to one CPU, and with the
+kernel default (RPS off) all softirq packet processing for IPVS and every
+HAProxy session lands on that CPU. For each interface with fewer RX queues
+than online CPUs (not `lo`, not a bridge) whose `rps_cpus` mask is still empty,
+the agent writes the all-CPU mask, sets `rps_flow_cnt` and raises
+`net.core.rps_sock_flow_entries` to 65536 (RFS). Administrator masks and larger
+values are kept; failures (read-only sysfs in containers) are only logged.
 
 ## Security boundary
 

@@ -293,3 +293,28 @@ checks 69–80; repeat them on a disposable VPS before production rollout.
     `-H 'Host: x.example.org:80'` (wildcard record, port in Host) return `301`
     with `Location: https://<host>/path`; an unknown or missing Host returns
     `400`; TLS SNI routing on 80/443 is unchanged.
+
+## 2.0.2 acceptance checks — receive steering
+
+84. On a node whose NIC reports `Combined: 1` in `ethtool -l`, after the agent
+    starts: `cat /sys/class/net/<iface>/queues/rx-0/rps_cpus` is the all-CPU
+    mask (`f` for 4 vCPU), `rps_flow_cnt` is `65536`,
+    `sysctl net.core.rps_sock_flow_entries` is `65536`, and the journal has
+    `enabled receive packet steering`.
+85. Under the same traffic, `mpstat -P ALL 1 10` shows `%soft` spread across
+    all CPUs instead of one CPU carrying most of it.
+86. A mask set by hand before the agent starts (e.g. `echo c > rps_cpus`) is
+    kept after restart and publish; `lo`, bridges and NICs with a queue per CPU
+    are untouched. In a container with read-only sysfs the agent only logs a
+    warning and the data plane works.
+87. `/var/lib/ezhiklb-agent/haproxy.cfg` contains no `log`/`tcplog` lines;
+    300 proxied TCP sessions add no lines to
+    `journalctl -u ezhiklb-haproxy`.
+88. `systemctl restart ezhiklb-agent` with an unchanged profile keeps the same
+    HAProxy PIDs (`pgrep -x haproxy`), TCP keeps working, and the agent journal
+    has no `weight sync failed`. Changing a backend weight still reloads once.
+89. With no clients the node's active IPs drop to 0; three held TCP sessions
+    from one address show exactly 1 within ~60 s (counted via `ss`, no
+    `show sess` on the HAProxy socket).
+90. After `install.sh`, `systemctl show ezhiklb-haproxy -p LogRateLimitBurst`
+    is `200` and `ezhiklb-agent` is `300`.

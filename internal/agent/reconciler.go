@@ -751,6 +751,7 @@ func (r *Reconciler) configureKernel(ctx context.Context) error {
 	if _, err := r.runner.Run(ctx, "ipvsadm", []string{"--set", "900", "120", strconv.Itoa(udpIPVSTimeoutSeconds)}, ""); err != nil {
 		return fmt.Errorf("set IPVS UDP connection timeout: %w", err)
 	}
+	r.tuneReceiveSteering()
 	return nil
 }
 

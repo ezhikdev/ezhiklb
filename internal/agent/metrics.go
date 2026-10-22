@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -42,7 +43,9 @@ func NewMetricsCollector() *MetricsCollector {
 	return &MetricsCollector{seenIPs: make(map[string]time.Time), now: time.Now}
 }
 
-func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
+// Collect samples the node; services are the applied ones, used to find the
+// TCP listeners whose clients count as active IPs.
+func (c *MetricsCollector) Collect(ctx context.Context, runner Runner, services []Service) (domain.NodeMetrics, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now().UTC()
@@ -56,7 +59,7 @@ func (c *MetricsCollector) Collect() (domain.NodeMetrics, error) {
 	cores := runtime.NumCPU()
 	if now.Sub(c.lastActiveIPsScan) >= activeIPsScanInterval {
 		for _, address := range readActiveIPVSClients("/proc/net/ip_vs_conn") { c.seenIPs[address] = now }
-		for _, address := range readActiveHAProxyClients() { c.seenIPs[address] = now }
+		for _, address := range readActiveTCPClients(ctx, runner, services) { c.seenIPs[address] = now }
 		c.lastActiveIPsScan = now
 	}
 	cutoff := now.Add(-time.Minute)

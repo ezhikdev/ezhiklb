@@ -21,7 +21,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "2.0.1"
+const version = "2.0.2"
 
 type client struct {
 	baseURL string
@@ -99,11 +99,12 @@ func main() {
 	}
 
 	report := func() bool {
-		stats, err := agent.CollectDataPlaneStats(ctx, runner, reconciler.Services())
+		services := reconciler.Services()
+		stats, err := agent.CollectDataPlaneStats(ctx, runner, services)
 		if err != nil {
 			logger.Warn("collect IPVS stats", "error", err)
 		}
-		if collected, collectErr := metricsCollector.Collect(); collectErr != nil {
+		if collected, collectErr := metricsCollector.Collect(ctx, runner, services); collectErr != nil {
 			logger.Warn("collect system metrics", "error", collectErr)
 		} else {
 			metrics = collected

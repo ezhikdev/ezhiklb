@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EZHIKLB_VERSION="2.0.1"
+EZHIKLB_VERSION="2.0.2"
 PREFIX="/opt/ezhiklb"
 CONFIG_DIR="/etc/ezhiklb"
 DATA_DIR="/var/lib/ezhiklb"
@@ -374,6 +374,9 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 LimitNOFILE=1048576
+# Bridges often have ~20 GB disks: cap what an error storm can write.
+LogRateLimitIntervalSec=60s
+LogRateLimitBurst=200
 
 [Install]
 WantedBy=multi-user.target
@@ -394,6 +397,8 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=${AGENT_DATA_DIR} ${PREFIX}/bin ${CONFIG_DIR}
+LogRateLimitIntervalSec=60s
+LogRateLimitBurst=300
 
 [Install]
 WantedBy=multi-user.target
