@@ -76,7 +76,9 @@ SNI, so service keys stay unique. HAProxy renders one shared frontend:
 fe_ezhiklb.sni  bind INGRESS:80, INGRESS:443
   tcp-request inspect-delay 5s
   accept once the full ClientHello (req.ssl_sni) or any non-TLS byte arrived
+    (with HTTP records: or complete HTTP request headers)
   use_backend be_<record> if SNI matches   exact names first, then *.suffix
+  use_backend be_<record> if HTTP Host/path match   (2.0.3, see below)
   TLS without a match  -> be_ezhiklb.reject-tls   -> abns strict-sni listener (TLS alert)
   anything else        -> be_ezhiklb.reject-plain -> abns HTTP listener (400, silent close when idle)
 ```
@@ -86,6 +88,22 @@ self-signed placeholder with a random `.invalid` name (`sni-reject.pem` next to
 `state.json`) that no client ever requests. Record backends are the usual
 `be_<listener>` proxies, so weights, affinity, health weight changes and
 statistics work unchanged; statistics carry the SNI.
+
+Since 2.0.3 a record with `match_host: true` is routed by plain HTTP instead:
+`sni` is compared with the Host header (port stripped; empty matches any host)
+and `path` with the request path (`/ws` renders `{ path /ws }` and
+`{ path_beg /ws/ }`; empty or `/` matches any path). HAProxy evaluates these
+HTTP fetches on the raw buffer of the TCP frontend after
+`tcp-request content accept if HTTP` has waited for the complete headers, so
+the connection is still spliced through unchanged (WebSocket, HTTPUpgrade,
+xhttp) and only its first request selects the record. Order: exact Host,
+wildcard (longest first), any Host; longest path first within a Host. TLS
+hides the path, so a TLS connection only ever matches SNI records and an SNI
+record cannot have a path. HTTP records do not redirect to https. Their
+statistics key is `domain.RouteLabel` (`http://host/path`, `*` for any host).
+The panel refuses to publish or assign such a profile to agents older than
+`HTTPRouteMinAgentVersion` (2.0.3); SNI-only profiles render exactly as in
+2.0.2.
 
 When a hidden revision is applied the agent installs `EZHIKLB-INPUT` as the
 first `INPUT` rule for IPv4 and IPv6. It RETURNs loopback, ESTABLISHED/RELATED,

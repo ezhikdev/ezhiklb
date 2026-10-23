@@ -25,6 +25,7 @@ var ErrNodeNotPendingDeletion = errors.New("node is not pending deletion")
 var ErrResetUnsupported = errors.New("сначала обновите все назначенные ноды до 1.0.7, чтобы сбросить распределение клиентов")
 var ErrRateLimitUnsupported = errors.New("сначала обновите все назначенные ноды до 1.1.0, чтобы включить ограничение скорости")
 var ErrHiddenUnsupported = errors.New("сначала обновите назначенные ноды до " + domain.HiddenMinAgentVersion + ", чтобы включить скрытый профиль")
+var ErrHTTPRouteUnsupported = errors.New("сначала обновите назначенные ноды до " + domain.HTTPRouteMinAgentVersion + ", чтобы включить маршрутизацию по Host и path")
 var ErrProfileNameTaken = errors.New("профиль с таким названием уже существует")
 var ErrNodeNameTaken = errors.New("нода с таким названием уже существует")
 
@@ -613,6 +614,13 @@ func (s *Store) PublishRevision(ctx context.Context, profileID, name, descriptio
 			return domain.Profile{}, domain.Revision{}, ErrHiddenUnsupported
 		}
 	}
+	if config.HasHTTPRoutes() {
+		if outdated, err := profileHasOutdatedAgents(ctx, tx, profileID, domain.HTTPRouteMinAgentVersion); err != nil {
+			return domain.Profile{}, domain.Revision{}, err
+		} else if outdated {
+			return domain.Profile{}, domain.Revision{}, ErrHTTPRouteUnsupported
+		}
+	}
 	var duplicate int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM profile_revisions WHERE profile_id=? AND version_label=?`, profileID, version).Scan(&duplicate); err != nil {
 		return domain.Profile{}, domain.Revision{}, err
@@ -1052,6 +1060,9 @@ func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) err
 		}
 		if config.Hidden && agentVersion != "" && domain.CompareVersions(agentVersion, domain.HiddenMinAgentVersion) < 0 {
 			return ErrHiddenUnsupported
+		}
+		if config.HasHTTPRoutes() && agentVersion != "" && domain.CompareVersions(agentVersion, domain.HTTPRouteMinAgentVersion) < 0 {
+			return ErrHTTPRouteUnsupported
 		}
 	}
 	result, err := s.db.ExecContext(ctx,

@@ -281,7 +281,7 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
 		return
 	}
-	if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) {
+	if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) || errors.Is(err, store.ErrHTTPRouteUnsupported) {
 		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
 		return
 	}
@@ -609,7 +609,7 @@ func (s *Server) assignProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.AssignProfile(r.Context(), r.PathValue("id"), body.ProfileID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node or profile not found")
-	} else if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) {
+	} else if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) || errors.Is(err, store.ErrHTTPRouteUnsupported) {
 		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
 	} else if err != nil {
 		s.internalError(w, err)
@@ -672,6 +672,10 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 	// without SNI routing or the inbound firewall: refuse instead.
 	if state.Config.Hidden && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(agentVersion, domain.HiddenMinAgentVersion) < 0 {
 		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до "+domain.HiddenMinAgentVersion+" перед применением скрытого профиля")
+		return
+	}
+	if state.Config.HasHTTPRoutes() && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(agentVersion, domain.HTTPRouteMinAgentVersion) < 0 {
+		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до "+domain.HTTPRouteMinAgentVersion+" перед применением маршрутизации по Host и path")
 		return
 	}
 	etag := DesiredStateETag(state)
@@ -861,6 +865,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "2.0.2"
+const Version = "2.0.3"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

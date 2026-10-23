@@ -77,10 +77,65 @@ func sniCondition(name string) string {
 	return "{ req.ssl_sni -i " + name + " }"
 }
 
-// renderSNIFrontend writes the shared hidden-profile entry point. Matching
-// connections go to the record's backend; TLS without a matching SNI gets a
-// TLS alert from a strict-sni listener, anything else an HTTP 400.
+// httpRoutingOrder sorts HTTP records like sniRoutingOrder by Host, records
+// without a Host last; within one Host the longest path comes first.
+func httpRoutingOrder(services []Service) []Service {
+	ordered := append([]Service(nil), services...)
+	rank := func(host string) int {
+		switch {
+		case host == "":
+			return 2
+		case strings.HasPrefix(host, "*."):
+			return 1
+		}
+		return 0
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left, right := ordered[i], ordered[j]
+		if rank(left.Host) != rank(right.Host) {
+			return rank(left.Host) < rank(right.Host)
+		}
+		if len(left.Host) != len(right.Host) {
+			return len(left.Host) > len(right.Host)
+		}
+		if left.Host != right.Host {
+			return left.Host < right.Host
+		}
+		if len(left.Path) != len(right.Path) {
+			return len(left.Path) > len(right.Path)
+		}
+		return left.Path < right.Path
+	})
+	return ordered
+}
+
+// httpConditions returns the alternative conditions of an HTTP record. A path
+// matches itself and everything below it ("/ws" serves "/ws" and "/ws/x" but
+// not "/wsx"); an empty path or "/" matches any path.
+func httpConditions(service Service) []string {
+	base := "HTTP"
+	if service.Host != "" {
+		base += " " + hostCondition(service.Host)
+	}
+	if service.Path == "" || service.Path == "/" {
+		return []string{base}
+	}
+	return []string{base + " { path " + service.Path + " }", base + " { path_beg " + service.Path + "/ }"}
+}
+
+// renderSNIFrontend writes the shared hidden-profile entry point. TLS goes to
+// the record whose SNI matches, plain HTTP to the record whose Host and path
+// match; TLS without a matching SNI gets a TLS alert from a strict-sni
+// listener, anything else an HTTP redirect or 400.
 func renderSNIFrontend(b *strings.Builder, services []Service, rejectCertificate string) {
+	var tlsRoutes, httpRoutes []Service
+	for _, service := range services {
+		if service.HTTPRoute {
+			httpRoutes = append(httpRoutes, service)
+		} else {
+			tlsRoutes = append(tlsRoutes, service)
+		}
+	}
 	address := services[0].Address
 	fmt.Fprintf(b, "frontend %s\n", sniFrontendName)
 	for _, port := range domain.HiddenPorts {
@@ -90,9 +145,19 @@ func renderSNIFrontend(b *strings.Builder, services []Service, rejectCertificate
 	// several TCP segments and req.ssl_sni reports "may change" until then.
 	fmt.Fprintf(b, "  tcp-request inspect-delay %s\n", sniInspectDelay)
 	b.WriteString("  tcp-request content accept if { req.ssl_sni -m found }\n")
+	if len(httpRoutes) > 0 {
+		// Likewise wait for complete request headers before reading Host
+		// and path; data that is not HTTP is accepted by the next rule.
+		b.WriteString("  tcp-request content accept if HTTP\n")
+	}
 	b.WriteString("  tcp-request content accept if { req.len gt 0 } !{ req.ssl_hello_type 1 }\n")
-	for _, service := range sniRoutingOrder(services) {
+	for _, service := range sniRoutingOrder(tlsRoutes) {
 		fmt.Fprintf(b, "  use_backend be_%s if %s\n", safeHAProxyName(service.ListenerID), sniCondition(service.SNI))
+	}
+	for _, service := range httpRoutingOrder(httpRoutes) {
+		for _, condition := range httpConditions(service) {
+			fmt.Fprintf(b, "  use_backend be_%s if %s\n", safeHAProxyName(service.ListenerID), condition)
+		}
 	}
 	fmt.Fprintf(b, "  use_backend %s if { req.ssl_hello_type 1 }\n", sniRejectTLSBackend)
 	fmt.Fprintf(b, "  default_backend %s\n\n", sniRejectHTTPBackend)
@@ -104,10 +169,10 @@ func renderSNIFrontend(b *strings.Builder, services []Service, rejectCertificate
 	fmt.Fprintf(b, "frontend fe_ezhiklb.reject-tls\n  mode http\n  no log\n  bind %s ssl crt %s strict-sni\n  timeout http-request 5s\n  http-request deny deny_status 421\n\n", sniRejectTLSSocket, rejectCertificate)
 	// http-ignore-probes closes silent connections without a 408 response,
 	// so a bare TCP probe learns nothing beyond "port open". A browser opening
-	// http:// for a record's domain is sent to https:// (same host and path);
-	// any other Host still gets 400.
+	// http:// for an SNI record's domain is sent to https:// (same host and
+	// path); any other Host still gets 400.
 	fmt.Fprintf(b, "frontend fe_ezhiklb.reject-plain\n  mode http\n  no log\n  option http-ignore-probes\n  bind %s\n  timeout http-request 5s\n", sniRejectHTTPSocket)
-	for _, service := range sniRoutingOrder(services) {
+	for _, service := range sniRoutingOrder(tlsRoutes) {
 		fmt.Fprintf(b, "  http-request redirect scheme https code 301 if %s\n", hostCondition(service.SNI))
 	}
 	b.WriteString("  http-request deny deny_status 400\n\n")

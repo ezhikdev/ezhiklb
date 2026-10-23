@@ -52,13 +52,48 @@ export function isValidSNI(value: string) {
   return !/^\d+$/.test(labels[labels.length - 1])
 }
 
+export function normalizePath(value: string) {
+  const path = value.trim()
+  return path.length > 1 ? path.replace(/\/+$/, "") || "/" : path
+}
+
+/** Mirrors domain.ValidPath: an absolute path without query, spaces or quotes. */
+export const isValidPath = (value: string) => {
+  const path = normalizePath(value)
+  return path.length <= 256 && /^\/[A-Za-z0-9._~%:@!+,;=/-]*$/.test(path) && !path.includes("//")
+}
+
+/** Mirrors domain.RouteLabel: the key a hidden record has in statistics. */
+export function routeLabel(listener: Listener) {
+  if (!listener.match_host) return normalizeSNI(listener.sni ?? "")
+  return `http://${normalizeSNI(listener.sni ?? "") || "*"}${normalizePath(listener.path ?? "")}`
+}
+
+/** Human-readable route of a hidden record for lists and tables. */
+export function routeTitle(listener: Listener) {
+  if (!listener.match_host) return normalizeSNI(listener.sni ?? "")
+  const host = normalizeSNI(listener.sni ?? ""), path = normalizePath(listener.path ?? "")
+  return host ? `${host}${path}` : `любой Host · ${path}`
+}
+
+/** Route errors of a hidden record, keyed by field ("sni" or "path"). */
+function routeErrors(listener: Listener, others: Listener[]): ListenerErrors {
+  const errors: ListenerErrors = {}
+  const host = normalizeSNI(listener.sni ?? ""), path = (listener.path ?? "").trim()
+  if (listener.match_host) {
+    if (!host && !path) errors.path = "Укажите Host, path или оба"
+    if (host && !isValidSNI(host)) errors.sni = "Домен вида cdn.example.com или *.example.com — или оставьте пустым для любого Host"
+    if (path && !isValidPath(path)) errors.path = "Начинается с /, без пробелов, кавычек, ? и #"
+  } else if (!isValidSNI(host)) errors.sni = "Укажите домен, например vpn.example.com или *.example.com"
+  if (Object.keys(errors).length === 0 && others.some((candidate) => routeLabel(candidate) === routeLabel(listener))) errors[listener.match_host && path ? "path" : "sni"] = "Такой маршрут уже используется другой записью"
+  return errors
+}
+
 function validateListener(listener: Listener, others: Listener[], hidden: boolean): ListenerErrors {
   const errors: ListenerErrors = {}
   if (!listener.name.trim()) errors.name = "Укажите название записи"
   if (hidden) {
-    const sni = normalizeSNI(listener.sni ?? "")
-    if (!isValidSNI(sni)) errors.sni = "Укажите домен, например vpn.example.com или *.example.com"
-    else if (others.some((candidate) => normalizeSNI(candidate.sni ?? "") === sni)) errors.sni = "Этот SNI уже используется другой записью"
+    Object.assign(errors, routeErrors(listener, others))
   } else {
     if (!isIPv4(listener.listen_address)) errors.listen_address = "Укажите корректный IPv4-адрес"
     if (!Number.isInteger(listener.listen_port) || listener.listen_port < 1 || listener.listen_port > 65535) errors.listen_port = "Порт должен быть от 1 до 65535"
@@ -79,16 +114,16 @@ function validateListener(listener: Listener, others: Listener[], hidden: boolea
   return errors
 }
 
-/** Records of a hidden profile that still need a valid, unique SNI. */
+/** Records of a hidden profile that still need a valid, unique route. */
 export function hiddenProblems(config: ProfileConfig): string[] {
   if (!config.hidden) return []
   const seen = new Map<string, string>()
   const problems: string[] = []
   for (const listener of config.listeners) {
-    const sni = normalizeSNI(listener.sni ?? "")
-    if (!isValidSNI(sni)) problems.push(`«${listener.name}»: укажите SNI`)
-    else if (seen.has(sni)) problems.push(`«${listener.name}»: SNI ${sni} уже у «${seen.get(sni)}»`)
-    else seen.set(sni, listener.name)
+    const label = routeLabel(listener)
+    if (Object.keys(routeErrors(listener, [])).length > 0) problems.push(`«${listener.name}»: ${listener.match_host ? "укажите Host или path" : "укажите SNI"}`)
+    else if (seen.has(label)) problems.push(`«${listener.name}»: маршрут ${routeTitle(listener)} уже у «${seen.get(label)}»`)
+    else seen.set(label, listener.name)
   }
   return problems
 }
@@ -112,7 +147,7 @@ export function ProfileEditor({ value, health, nodeAddresses, onChange }: { valu
     const clone = structuredClone(listener)
     clone.id = makeID("lst")
     clone.name = `${listener.name} — копия`
-    if (hidden) clone.sni = ""
+    if (hidden) { clone.sni = ""; if (clone.match_host) clone.path = "" }
     else clone.listen_port = Math.min(65535, listener.listen_port + 1)
     clone.backends = clone.backends.map((backend) => ({ ...backend, id: makeID("bck") }))
     setEditing({ listener: clone, index: null })
@@ -134,12 +169,12 @@ export function ProfileEditor({ value, health, nodeAddresses, onChange }: { valu
     </Card>
 
     <div className="section-heading">
-      <div><p className="eyebrow">{hidden ? "Маршрутизация по SNI · TCP 80 + 443" : "Маршрутизация"}</p><h3>{config.listeners.length} записей · {totalBackends} выходов</h3></div>
+      <div><p className="eyebrow">{hidden ? "Маршрутизация по SNI и Host · TCP 80 + 443" : "Маршрутизация"}</p><h3>{config.listeners.length} записей · {totalBackends} выходов</h3></div>
       <Button variant="secondary" onClick={() => setEditing({ listener: newListener(hidden), index: null })}><Plus data-icon="inline-start" />Добавить запись</Button>
     </div>
 
     {config.listeners.length === 0
-      ? <div className="inline-empty"><Server /><div><strong>Записей пока нет</strong><span>{hidden ? "Добавьте домен (SNI) и хотя бы один выход." : "Добавьте входной порт и хотя бы один backend."}</span></div></div>
+      ? <div className="inline-empty"><Server /><div><strong>Записей пока нет</strong><span>{hidden ? "Добавьте домен (SNI) или Host/path и хотя бы один выход." : "Добавьте входной порт и хотя бы один backend."}</span></div></div>
       : <RuleList listeners={config.listeners} hidden={hidden}
           onToggle={(index, enabled) => onChange({ ...config, listeners: config.listeners.map((item, itemIndex) => itemIndex === index ? { ...item, enabled } : item) })}
           onEdit={(index) => setEditing({ listener: structuredClone(config.listeners[index]), index })}
@@ -172,14 +207,14 @@ function RuleList({ listeners, hidden, onToggle, onEdit, onClone, onRemove, onRe
 function RuleRow({ listener, hidden, onToggle, onEdit, onClone, onRemove, dragHandleProps }: { listener: Listener; hidden: boolean; onToggle: (enabled: boolean) => void; onEdit: () => void; onClone: () => void; onRemove: () => void; dragHandleProps: React.HTMLAttributes<HTMLButtonElement> }) {
   const enabledBackends = listener.backends.filter((backend) => backend.enabled)
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
-  const sni = normalizeSNI(listener.sni ?? "")
-  return <Card className={`rule-row ${listener.enabled ? "" : "rule-row--disabled"} ${hidden && !isValidSNI(sni) ? "rule-row--invalid" : ""}`}>
+  const routeValid = !hidden || Object.keys(routeErrors(listener, [])).length === 0
+  return <Card className={`rule-row ${listener.enabled ? "" : "rule-row--disabled"} ${routeValid ? "" : "rule-row--invalid"}`}>
     <button type="button" className="rule-row__handle" aria-label={`Изменить порядок: ${listener.name}`} title="Перетащите, чтобы изменить порядок в списке"
       {...dragHandleProps}><GripVertical /></button>
     <div className="rule-row__toggle"><Switch label={`${listener.enabled ? "Выключить" : "Включить"} ${listener.name}`} checked={listener.enabled} onChange={onToggle} /></div>
     <button type="button" className="rule-row__main" onClick={onEdit}>
-      <div className="rule-row__name"><strong>{listener.name}</strong><span>{hidden ? `SNI · TCP ${hiddenPorts.join(" + ")}` : listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}{!hidden && listener.rate_limit_enabled ? ` · ≤ ${listener.rate_limit_mbps} Мбит/с` : ""}</span></div>
-      <div className="rule-route mono">{hidden ? <span className={`sni-chip ${isValidSNI(sni) ? "" : "sni-chip--missing"}`}><Globe />{isValidSNI(sni) ? sni : "SNI не указан"}</span> : <span>{listener.listen_address}:{listener.listen_port}</span>}<ArrowRight /><span>{enabledBackends.length} {enabledBackends.length === 1 ? "выход" : "выхода"}</span></div>
+      <div className="rule-row__name"><strong>{listener.name}</strong><span>{hidden ? `${listener.match_host ? "HTTP" : "SNI"} · TCP ${hiddenPorts.join(" + ")}` : listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}{!hidden && listener.rate_limit_enabled ? ` · ≤ ${listener.rate_limit_mbps} Мбит/с` : ""}</span></div>
+      <div className="rule-route mono">{hidden ? <span className={`sni-chip ${routeValid ? "" : "sni-chip--missing"}`}><Globe />{routeValid ? routeTitle(listener) : listener.match_host ? "Host и path не указаны" : "SNI не указан"}</span> : <span>{listener.listen_address}:{listener.listen_port}</span>}<ArrowRight /><span>{enabledBackends.length} {enabledBackends.length === 1 ? "выход" : "выхода"}</span></div>
       <div className="rule-targets">{enabledBackends.slice(0, 2).map((backend) => <span key={backend.id}>{backend.address}:{backend.port} · {totalWeight ? Math.round(backend.weight / totalWeight * 100) : 0}%</span>)}{enabledBackends.length > 2 && <span>+ ещё {enabledBackends.length - 2}</span>}</div>
     </button>
     <div className="rule-row__actions">
@@ -188,6 +223,14 @@ function RuleRow({ listener, hidden, onToggle, onEdit, onClone, onRemove, dragHa
       <Button variant="ghost" className="icon-button danger-hover" aria-label={`Удалить ${listener.name}`} title="Удалить" onClick={onRemove}><Trash2 /></Button>
     </div>
   </Card>
+}
+
+/** Normalizes the route of a hidden record; an SNI record never keeps a path. */
+function hiddenRecord(listener: Listener): Listener {
+  const { path, match_host, ...rest } = listener
+  const record: Listener = { ...rest, name: listener.name.trim(), sni: normalizeSNI(listener.sni ?? "") }
+  if (match_host) Object.assign(record, { match_host: true, path: normalizePath(path ?? "") })
+  return record
 }
 
 function ListenerDialog({ initial, hidden, others, health, nodeAddresses, onSave, onClose }: { initial: Listener; hidden: boolean; others: Listener[]; health: BackendHealth[]; nodeAddresses: string[]; onSave: (listener: Listener) => void; onClose: () => void }) {
@@ -202,20 +245,27 @@ function ListenerDialog({ initial, hidden, others, health, nodeAddresses, onSave
   const submit = () => {
     const nextErrors = validateListener(listener, others, hidden)
     setErrors(nextErrors)
-    if (Object.keys(nextErrors).length === 0) onSave({ ...listener, name: listener.name.trim(), ...(hidden ? { sni: normalizeSNI(listener.sni ?? "") } : {}) })
+    if (Object.keys(nextErrors).length === 0) onSave(hidden ? hiddenRecord(listener) : { ...listener, name: listener.name.trim() })
   }
   const enabledBackends = listener.backends.filter((backend) => backend.enabled)
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
+  const matchHost = Boolean(listener.match_host)
 
-  return <Dialog wide title={initial.name === "Новая запись" ? "Новая запись" : `Редактирование · ${initial.name}`} description={hidden ? "Домен (SNI) определяет, на какие выходы уйдёт подключение." : "Настройте входящий трафик и распределение между выходами."} onClose={close}>
+  return <Dialog wide title={initial.name === "Новая запись" ? "Новая запись" : `Редактирование · ${initial.name}`} description={hidden ? "Домен (SNI) или Host и path определяют, на какие выходы уйдёт подключение." : "Настройте входящий трафик и распределение между выходами."} onClose={close}>
     <div className="dialog__body listener-dialog-body">
       <div className="listener-status-line"><Switch label="Включить запись" checked={listener.enabled} onChange={(enabled) => patch({ enabled })} /><div><strong>{listener.enabled ? "Запись включена" : "Запись выключена"}</strong><span>Изменение вступит в силу после публикации профиля.</span></div></div>
       {hidden ? <>
         <div className="form-grid">
           <Field label="Название" error={errors.name}><Input value={listener.name} aria-invalid={Boolean(errors.name)} onChange={(e) => patch({ name: e.target.value })} /></Field>
-          <Field label="SNI (домен)" hint="Точное имя или маска *.example.com — совпадение без учёта регистра" error={errors.sni}><Input className="input mono" placeholder="vpn.example.com" spellCheck={false} autoCapitalize="off" value={listener.sni ?? ""} aria-invalid={Boolean(errors.sni)} onChange={(e) => patch({ sni: e.target.value })} /></Field>
+          <Field label="Сопоставлять по" hint={matchHost ? "Заголовок Host и путь незашифрованного HTTP" : "Имя сервера из TLS ClientHello"}><div className="protocol-toggle" role="group" aria-label="Сопоставлять по">{([[false, "SNI · TLS"], [true, "Host · HTTP"]] as const).map(([value, label]) => <button type="button" key={label} aria-pressed={matchHost === value} onClick={() => { patch({ match_host: value }); setErrors({}) }}>{label}</button>)}</div></Field>
         </div>
-        <div className="hidden-socket-note"><Lock /><div><strong>Вход: TCP {hiddenPorts.join(" и ")} на IPv4 ноды</strong><span>Подключение с этим SNI уйдёт на выходы ниже по выбранному планировщику. Без SNI или с чужим SNI соединение не проксируется и получает ошибку.</span></div></div>
+        {matchHost ? <div className="form-grid">
+          <Field label="Host (домен)" hint="Пусто — любой Host. Маска *.example.com допустима" error={errors.sni}><Input className="input mono" placeholder="любой" spellCheck={false} autoCapitalize="off" value={listener.sni ?? ""} aria-invalid={Boolean(errors.sni)} onChange={(e) => patch({ sni: e.target.value })} /></Field>
+          <Field label="Path" hint="Пусто — любой путь. /ws также ловит /ws/…" error={errors.path}><Input className="input mono" placeholder="/ws" spellCheck={false} autoCapitalize="off" value={listener.path ?? ""} aria-invalid={Boolean(errors.path)} onChange={(e) => patch({ path: e.target.value })} /></Field>
+        </div> : <Field label="SNI (домен)" hint="Точное имя или маска *.example.com — совпадение без учёта регистра" error={errors.sni}><Input className="input mono" placeholder="vpn.example.com" spellCheck={false} autoCapitalize="off" value={listener.sni ?? ""} aria-invalid={Boolean(errors.sni)} onChange={(e) => patch({ sni: e.target.value })} /></Field>}
+        <div className="hidden-socket-note"><Lock /><div><strong>Вход: TCP {hiddenPorts.join(" и ")} на IPv4 ноды</strong><span>{matchHost
+          ? "Только незашифрованный HTTP (например, CDN ходит на ноду по http://): запрос с подходящими Host и path уйдёт на выходы ниже. Нужен хотя бы Host или path. В TLS путь не виден — такие подключения сопоставляются только по SNI."
+          : "Подключение с этим SNI уйдёт на выходы ниже по выбранному планировщику. Без SNI или с чужим SNI соединение не проксируется и получает ошибку."}</span></div></div>
         <Field label="Планировщик" hint="WRR учитывает вес, RR распределяет поровну"><SelectMenu label="Планировщик" value={listener.scheduler} onChange={(value) => patch({ scheduler: value as Listener["scheduler"] })} options={[{ value: "wrr", label: "Weighted round-robin", description: "Распределение с учётом веса" }, { value: "rr", label: "Round-robin", description: "Равномерное распределение" }]} /></Field>
       </> : <>
         <div className="form-grid listener-fields">

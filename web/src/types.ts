@@ -29,6 +29,10 @@ export interface Listener {
   rate_limit_mbps?: number
   /** TLS server name a hidden profile routes by (kept but unused in regular profiles). */
   sni?: string
+  /** Hidden record routed by plain-HTTP Host (sni, empty = any) and path instead of TLS SNI. */
+  match_host?: boolean
+  /** Request path of a match_host record: "/ws" also serves "/ws/…". */
+  path?: string
   backends: Backend[]
 }
 

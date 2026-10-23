@@ -102,6 +102,53 @@ func TestRenderHiddenHAProxyConfig(t *testing.T) {
 	}
 }
 
+func httpRoutesConfig() domain.ProfileConfig {
+	config := hiddenConfig()
+	route := func(id, host, path string) domain.Listener {
+		return domain.Listener{ID: id, Name: id, Enabled: true, ListenPort: 443, Protocols: []domain.Protocol{domain.ProtocolTCP}, Scheduler: "wrr", SNI: host, MatchHost: true, Path: path,
+			Backends: []domain.Backend{{ID: id + "-1", Address: "192.0.2.20", Port: 8080, Weight: 1, Enabled: true}}}
+	}
+	config.Listeners = append(config.Listeners, route("anyws", "", "/ws/"), route("hostws", "CDN.example.org", "/ws"), route("hostws2", "cdn.example.org", "/ws/deep"), route("cdn", "cdn.example.org", ""))
+	return config
+}
+
+func TestRenderHiddenHTTPRoutes(t *testing.T) {
+	services := compileServices(httpRoutesConfig(), "198.51.100.10")
+	config := renderHAProxyConfig(services, "/tmp/reject.pem")
+	for _, expected := range []string{
+		"tcp-request content accept if HTTP\n",
+		"use_backend be_hostws2 if HTTP { hdr(host),field(1,:) -i cdn.example.org } { path /ws/deep }",
+		"use_backend be_hostws if HTTP { hdr(host),field(1,:) -i cdn.example.org } { path_beg /ws/ }",
+		"use_backend be_cdn if HTTP { hdr(host),field(1,:) -i cdn.example.org }\n",
+		"use_backend be_anyws if HTTP { path /ws }", "use_backend be_anyws if HTTP { path_beg /ws/ }",
+	} {
+		if !strings.Contains(config, expected) {
+			t.Fatalf("config does not contain %q:\n%s", expected, config)
+		}
+	}
+	order := []string{"be_exact if", "be_wild if", "be_hostws2 if", "be_hostws if", "be_cdn if", "be_anyws if", "be_ezhiklb.reject-tls if"}
+	for i := 1; i < len(order); i++ {
+		if strings.Index(config, order[i-1]) > strings.Index(config, order[i]) {
+			t.Fatalf("%q must come before %q:\n%s", order[i-1], order[i], config)
+		}
+	}
+	if strings.Contains(config, "redirect scheme https code 301 if { hdr(host),field(1,:) -i cdn.example.org }") {
+		t.Fatalf("HTTP records must not redirect to https:\n%s", config)
+	}
+	labels := map[string]bool{}
+	for _, service := range services {
+		labels[service.SNI] = true
+	}
+	for _, label := range []string{"vpn.example.org", "http://*/ws", "http://cdn.example.org/ws", "http://cdn.example.org"} {
+		if !labels[label] {
+			t.Fatalf("missing route label %q in %#v", label, labels)
+		}
+	}
+	if strings.Contains(renderHAProxyConfig(compileServices(hiddenConfig(), "198.51.100.10"), "/tmp/reject.pem"), "accept if HTTP") {
+		t.Fatal("an SNI-only profile must keep the 2.0.0 frontend")
+	}
+}
+
 func TestHAProxyAcceptsHiddenConfig(t *testing.T) {
 	haproxy, err := exec.LookPath("haproxy")
 	if err != nil {
@@ -113,7 +160,7 @@ func TestHAProxyAcceptsHiddenConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "haproxy.cfg")
-	if err := os.WriteFile(path, []byte(renderHAProxyConfig(compileServices(hiddenConfig(), "127.0.0.1"), certificate)), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(renderHAProxyConfig(compileServices(httpRoutesConfig(), "127.0.0.1"), certificate)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if output, err := exec.Command(haproxy, "-c", "-f", path).CombinedOutput(); err != nil {

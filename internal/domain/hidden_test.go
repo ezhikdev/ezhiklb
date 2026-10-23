@@ -85,3 +85,53 @@ func TestLegacyConfigDecodesAsRegularProfile(t *testing.T) {
 		t.Fatalf("regular profiles must keep the 1.x JSON shape: %s", data)
 	}
 }
+
+func httpListener(id, host, path string) Listener {
+	listener := hiddenListener(id, host)
+	listener.MatchHost, listener.Path = true, path
+	return listener
+}
+
+func TestHiddenHTTPRoutes(t *testing.T) {
+	config := DefaultProfileConfig()
+	config.Hidden = true
+	// The same domain may be routed by SNI (TLS) and by Host (plain HTTP).
+	config.Listeners = []Listener{hiddenListener("tls", "a.example.com"), httpListener("host", "a.example.com", ""), httpListener("both", "a.example.com", "/ws/"), httpListener("path", "", "/ws"), httpListener("wild", "*.example.com", "/")}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("valid HTTP routes rejected: %v", err)
+	}
+	if !config.HasHTTPRoutes() {
+		t.Fatal("HTTP routes not detected")
+	}
+	for listener, want := range map[int]string{0: "a.example.com", 1: "http://a.example.com", 2: "http://a.example.com/ws", 3: "http://*/ws", 4: "http://*.example.com/"} {
+		if got := RouteLabel(config.Listeners[listener]); got != want {
+			t.Errorf("RouteLabel(%d) = %q, want %q", listener, got, want)
+		}
+	}
+	config.Listeners = []Listener{hiddenListener("tls", "a.example.com")}
+	if config.HasHTTPRoutes() {
+		t.Fatal("an SNI-only profile reports HTTP routes")
+	}
+}
+
+func TestHiddenHTTPRoutesRejected(t *testing.T) {
+	cases := map[string][]Listener{
+		"neither host nor path": {httpListener("a", "", "")},
+		"path on SNI record":    {func() Listener { l := hiddenListener("a", "a.example.com"); l.Path = "/ws"; return l }()},
+		"relative path":         {httpListener("a", "", "ws")},
+		"path with space":       {httpListener("a", "", "/w s")},
+		"path with query":       {httpListener("a", "", "/ws?x=1")},
+		"path with quote":       {httpListener("a", "", "/w's")},
+		"double slash":          {httpListener("a", "", "/a//b")},
+		"invalid host":          {httpListener("a", "not a host", "/ws")},
+		"duplicate route":       {httpListener("a", "", "/ws"), httpListener("b", "", "/ws/")},
+	}
+	for name, listeners := range cases {
+		config := DefaultProfileConfig()
+		config.Hidden = true
+		config.Listeners = listeners
+		if err := config.Validate(); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

@@ -58,8 +58,14 @@ type Listener struct {
 	RateLimitMbps    int        `json:"rate_limit_mbps,omitempty"`
 	// SNI is the TLS server name a hidden profile routes by. Regular profiles
 	// keep the value so toggling the profile mode does not lose it.
-	SNI      string    `json:"sni,omitempty"`
-	Backends []Backend `json:"backends"`
+	SNI string `json:"sni,omitempty"`
+	// MatchHost switches a hidden record from TLS SNI to plain-HTTP routing:
+	// SNI is then compared with the Host header (empty matches any host) and
+	// Path with the request path. CDNs that reach the node over http:// send
+	// no SNI but keep the Host header.
+	MatchHost bool      `json:"match_host,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	Backends  []Backend `json:"backends"`
 }
 
 type ProfileConfig struct {
@@ -77,6 +83,10 @@ var HiddenPorts = []uint16{80, 443}
 
 // HiddenMinAgentVersion is the first agent that understands hidden profiles.
 const HiddenMinAgentVersion = "2.0.0"
+
+// HTTPRouteMinAgentVersion is the first agent that routes hidden records by
+// HTTP Host and path.
+const HTTPRouteMinAgentVersion = "2.0.3"
 
 var sniLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
@@ -108,6 +118,43 @@ func ValidSNI(value string) bool {
 	// A purely numeric top-level label is never a valid public host name.
 	tld := labels[len(labels)-1]
 	return strings.Trim(tld, "0123456789") != ""
+}
+
+// pathPattern keeps request paths free of characters HAProxy's config parser
+// treats specially (spaces, quotes, '#', '\', '$').
+var pathPattern = regexp.MustCompile(`^/[A-Za-z0-9._~%:@!+,;=/-]*$`)
+
+// NormalizePath trims spaces and a trailing slash ("/ws/" routes like "/ws");
+// a lone "/" is kept and matches every path.
+func NormalizePath(value string) string {
+	path := strings.TrimSpace(value)
+	if len(path) > 1 {
+		path = strings.TrimRight(path, "/")
+		if path == "" {
+			path = "/"
+		}
+	}
+	return path
+}
+
+// ValidPath accepts an absolute request path without query or fragment.
+func ValidPath(value string) bool {
+	path := NormalizePath(value)
+	return len(path) <= 256 && pathPattern.MatchString(path) && !strings.Contains(path, "//")
+}
+
+// RouteLabel identifies a hidden record in statistics and service keys. SNI
+// records keep the bare host name used since 2.0.0; HTTP records become
+// "http://host/path" with "*" for any host.
+func RouteLabel(listener Listener) string {
+	if !listener.MatchHost {
+		return NormalizeSNI(listener.SNI)
+	}
+	host := NormalizeSNI(listener.SNI)
+	if host == "" {
+		host = "*"
+	}
+	return "http://" + host + NormalizePath(listener.Path)
 }
 
 type Profile struct {
@@ -424,17 +471,42 @@ func validateListenerSockets(prefix string, listener Listener, serviceKeys map[s
 }
 
 // validateHiddenListener checks a hidden-profile record. Its socket is fixed
-// (TCP on HiddenPorts), so only the SNI has to be valid and unique.
+// (TCP on HiddenPorts), so only the route has to be valid and unique: an SNI
+// record needs a host name; an HTTP record needs a Host, a path or both.
 func validateHiddenListener(prefix string, listener Listener, owners map[string]string) []string {
 	var problems []string
-	if !ValidSNI(listener.SNI) {
-		problems = append(problems, prefix+".sni must be a host name such as vpn.example.com or *.example.com")
-	} else {
-		name := NormalizeSNI(listener.SNI)
-		if owner, exists := owners[name]; exists {
-			problems = append(problems, fmt.Sprintf("%s.sni %s is already used by listener %s", prefix, name, owner))
+	valid := true
+	host, path := strings.TrimSpace(listener.SNI), strings.TrimSpace(listener.Path)
+	if listener.MatchHost {
+		if host == "" && path == "" {
+			problems = append(problems, prefix+" needs a host, a path or both")
+			valid = false
 		}
-		owners[name] = listener.ID
+		if host != "" && !ValidSNI(host) {
+			problems = append(problems, prefix+".sni must be a host name such as vpn.example.com or *.example.com")
+			valid = false
+		}
+		if path != "" && !ValidPath(path) {
+			problems = append(problems, prefix+".path must start with / and contain only letters, digits and . _ ~ % : @ ! + , ; = - /")
+			valid = false
+		}
+	} else {
+		if !ValidSNI(host) {
+			problems = append(problems, prefix+".sni must be a host name such as vpn.example.com or *.example.com")
+			valid = false
+		}
+		if path != "" {
+			// TLS hides the path; only plain HTTP exposes it.
+			problems = append(problems, prefix+".path requires Host matching")
+			valid = false
+		}
+	}
+	if valid {
+		label := RouteLabel(listener)
+		if owner, exists := owners[label]; exists {
+			problems = append(problems, fmt.Sprintf("%s route %s is already used by listener %s", prefix, label, owner))
+		}
+		owners[label] = listener.ID
 	}
 	if len(listener.Protocols) != 1 || listener.Protocols[0] != ProtocolTCP {
 		problems = append(problems, prefix+".protocols must be tcp in a hidden profile")
@@ -443,6 +515,20 @@ func validateHiddenListener(prefix string, listener Listener, owners map[string]
 		problems = append(problems, prefix+".rate_limit is not available in a hidden profile")
 	}
 	return problems
+}
+
+// HasHTTPRoutes reports whether a hidden profile routes any record by HTTP
+// Host or path, which needs agent HTTPRouteMinAgentVersion.
+func (c ProfileConfig) HasHTTPRoutes() bool {
+	if !c.Hidden {
+		return false
+	}
+	for _, listener := range c.Listeners {
+		if listener.MatchHost {
+			return true
+		}
+	}
+	return false
 }
 
 func (c ProfileConfig) HasRateLimits() bool {

@@ -318,3 +318,28 @@ checks 69–80; repeat them on a disposable VPS before production rollout.
     `show sess` on the HAProxy socket).
 90. After `install.sh`, `systemctl show ezhiklb-haproxy -p LogRateLimitBurst`
     is `200` and `ezhiklb-agent` is `300`.
+
+## 2.0.3 acceptance checks — Host and path routing in hidden profiles
+
+Verified on the isolated stand (agent and panel 2.0.3, HAProxy 2.4.30) with a
+hidden profile holding one SNI record (`a.test`) and Host records `cdn.test`,
+`cdn.test` + `/ws/`, any Host + `/xhttp` and `*.wild.test` + `/`:
+
+91. Publishing a Host record with neither Host nor path, or an SNI record with
+    a path, is refused with `422`; the UI shows the error under the field and
+    keeps the publish button disabled.
+92. `haproxy -c` on the generated config passes without warnings.
+93. `curl -H 'Host: cdn.test' http://NODE/` (also `Host: cdn.test:80`) reaches
+    the `cdn.test` record; `/ws`, `/ws/abc?x=1` reach `cdn.test` + `/ws`;
+    `/wsx` stays on `cdn.test`; any Host with `/xhttp/1` reaches the path
+    record, also as plain HTTP on port 443; `cdn.test/xhttp` prefers the Host
+    record; `x.wild.test/q` reaches the wildcard record.
+94. An unmatched Host gets `400`; `http://a.test/p` still gets `301`; TLS with
+    SNI `a.test` is unchanged and TLS with SNI `cdn.test` gets a TLS alert.
+95. A request whose headers arrive in two segments 1.5 s apart is routed; a
+    WebSocket upgrade on `/ws/chat` returns `101` and streams both ways; a
+    non-HTTP plaintext line gets `400` without waiting for the inspect delay.
+96. `/api/v1/stats` lists `http://cdn.test`, `http://cdn.test/ws` and
+    `http://*/xhttp`.
+97. The 2.0.2 regression suite (`e2e.py`, 47 checks) passes after the upgrade
+    from 2.0.2 with `install.sh`.
