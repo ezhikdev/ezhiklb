@@ -29,9 +29,18 @@ var (
 	rpsSockFlowPath = "/proc/sys/net/core/rps_sock_flow_entries"
 )
 
+// RetuneReceiveSteering re-applies RPS after the number of online vCPUs
+// changed on a running VPS.
+func (r *Reconciler) RetuneReceiveSteering() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tuneReceiveSteering()
+}
+
 // tuneReceiveSteering enables RPS/RFS on every single-queue-per-CPU interface
-// whose RPS mask is still the kernel default (empty). Masks an administrator
-// already set are left alone. All failures are reported but non-fatal: sysfs
+// whose RPS mask is still the kernel default (empty) or the mask this agent
+// wrote before (refreshed when vCPUs were added or removed). Masks an
+// administrator set are left alone. All failures are reported but non-fatal: sysfs
 // is read-only in many containers and forwarding works without steering.
 func (r *Reconciler) tuneReceiveSteering() {
 	cpus, err := onlineCPUs()
@@ -67,7 +76,11 @@ func (r *Reconciler) tuneReceiveSteering() {
 		flowCount := rpsSockFlowEntries / len(queues)
 		for _, queue := range queues {
 			current, err := os.ReadFile(filepath.Join(queue, "rps_cpus"))
-			if err != nil || !emptyCPUMask(string(current)) {
+			if err != nil {
+				continue
+			}
+			ours := r.rpsMask != "" && sameCPUMask(string(current), r.rpsMask)
+			if !emptyCPUMask(string(current)) && !ours || sameCPUMask(string(current), mask) {
 				continue
 			}
 			if err := os.WriteFile(filepath.Join(queue, "rps_cpus"), []byte(mask), 0); err != nil {
@@ -80,6 +93,7 @@ func (r *Reconciler) tuneReceiveSteering() {
 			tuned++
 		}
 	}
+	r.rpsMask = mask
 	if tuned == 0 {
 		return
 	}
@@ -149,6 +163,15 @@ func cpuMask(cpus []int) string {
 		parts[len(words)-1-i] = fmt.Sprintf(format, word)
 	}
 	return strings.Join(parts, ",")
+}
+
+// sameCPUMask compares rps_cpus values ignoring the kernel's zero padding
+// and word separators ("0f" equals "f").
+func sameCPUMask(left, right string) bool {
+	normalize := func(value string) string {
+		return strings.TrimLeft(strings.ReplaceAll(strings.TrimSpace(value), ",", ""), "0")
+	}
+	return normalize(left) == normalize(right)
 }
 
 func emptyCPUMask(value string) bool {

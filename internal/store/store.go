@@ -200,6 +200,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"restart_nonce", `INTEGER NOT NULL DEFAULT 0`},
 		{"restart_ack", `INTEGER NOT NULL DEFAULT 0`},
 		{"applied_profile_id", `TEXT NOT NULL DEFAULT ''`},
+		{"tcp_tuning_enabled", `INTEGER NOT NULL DEFAULT 1`},
+		{"tcp_memory_percent", `INTEGER NOT NULL DEFAULT 70`},
+		{"ram_total_bytes", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		table := "nodes"
 		if column.name == "auto_version" || column.name == "version_label" {
@@ -966,6 +969,18 @@ func (s *Store) UpdateTrafficSettings(ctx context.Context, nodeID string, accoun
 	return s.Audit(ctx, "node.traffic_settings_updated", "node", nodeID, map[string]any{"accounting": accounting, "records": records, "auto_reset": autoReset, "reset_day": resetDay})
 }
 
+// UpdateTCPTuning stores a node's TCP memory automation setting; the agent
+// receives it with the next desired-state poll.
+func (s *Store) UpdateTCPTuning(ctx context.Context, nodeID string, enabled bool, percent int) error {
+	if percent < domain.TCPMemoryMinPercent || percent > domain.TCPMemoryMaxPercent {
+		return fmt.Errorf("TCP memory limit must be between %d%% and %d%% of RAM", domain.TCPMemoryMinPercent, domain.TCPMemoryMaxPercent)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET tcp_tuning_enabled=?,tcp_memory_percent=?,updated_at=? WHERE id=?`, enabled, percent, formatTime(time.Now().UTC()), nodeID)
+	if err != nil { return err }
+	if affected, _ := result.RowsAffected(); affected == 0 { return ErrNotFound }
+	return s.Audit(ctx, "node.tcp_tuning_updated", "node", nodeID, map[string]any{"enabled": enabled, "memory_percent": percent})
+}
+
 func (s *Store) ResetTraffic(ctx context.Context, nodeID string) error {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil); if err != nil { return err }; defer tx.Rollback()
@@ -1080,13 +1095,14 @@ func (s *Store) AssignProfile(ctx context.Context, nodeID, profileID string) err
 func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDesiredState, error) {
 	var result domain.NodeDesiredState
 	var configJSON string
+	var tuning domain.TCPTuning
 	err := s.db.QueryRowContext(ctx, `
-		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.reset_revision=n.desired_revision,n.status='deleting',n.update_target,CASE WHEN n.restart_nonce>n.restart_ack THEN n.restart_nonce ELSE 0 END,r.config_json
+		SELECT n.id,n.ingress_address,n.desired_revision,p.id,p.name,COALESCE(q.nonce,0),n.reset_revision=n.desired_revision,n.status='deleting',n.update_target,CASE WHEN n.restart_nonce>n.restart_ack THEN n.restart_nonce ELSE 0 END,n.tcp_tuning_enabled,n.tcp_memory_percent,r.config_json
 		FROM nodes n
 		JOIN profiles p ON p.id=n.profile_id
 		JOIN profile_revisions r ON r.profile_id=p.id AND r.number=n.desired_revision
 		LEFT JOIN node_probe_requests q ON q.node_id=n.id
-		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.ResetConnections, &result.Decommission, &result.UpdateVersion, &result.RestartNonce, &configJSON)
+		WHERE n.id=? AND n.status<>'disabled'`, nodeID).Scan(&result.NodeID, &result.IngressAddress, &result.Revision, &result.ProfileID, &result.ProfileName, &result.HealthProbe, &result.ResetConnections, &result.Decommission, &result.UpdateVersion, &result.RestartNonce, &tuning.Enabled, &tuning.MemoryPercent, &configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrNotFound
 	}
@@ -1096,6 +1112,7 @@ func (s *Store) DesiredState(ctx context.Context, nodeID string) (domain.NodeDes
 	if err := json.Unmarshal([]byte(configJSON), &result.Config); err != nil {
 		return result, err
 	}
+	result.TCPTuning = &tuning
 	return result, nil
 }
 
@@ -1212,8 +1229,8 @@ func (s *Store) Heartbeat(ctx context.Context, nodeID, version, observedAddress,
 	if updateTarget == "" && previousUpdateState == "completed" && updateState == "idle" {
 		updateState = "completed"
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,applied_profile_id=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,restart_ack=CASE WHEN ?>restart_ack THEN ? ELSE restart_ack END,updated_at=? WHERE id=? AND status<>'disabled'`,
-		applied, appliedProfile, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, restartAck, restartAck, formatTime(now), nodeID)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET applied_revision=?,applied_profile_id=?,agent_version=?,observed_address=CASE WHEN ?='' THEN observed_address ELSE ? END,status=?,apply_state=?,last_seen_at=?,online_since=?,last_error=?,ram_used_percent=?,cpu_used_percent=?,load_1=?,cpu_cores=?,ram_total_bytes=?,network_rx_bps=?,network_tx_bps=?,active_ips=?,metrics_collected_at=?,diagnostics_json=?,update_target=?,update_state=?,update_error=?,restart_ack=CASE WHEN ?>restart_ack THEN ? ELSE restart_ack END,updated_at=? WHERE id=? AND status<>'disabled'`,
+		applied, appliedProfile, version, observedAddress, observedAddress, status, applyState, formatTime(now), onlineSince, applyError, metrics.RAMUsedPercent, metrics.CPUUsedPercent, metrics.Load1, metrics.CPUCores, metrics.RAMTotalBytes, metrics.NetworkRxBPS, metrics.NetworkTxBPS, metrics.ActiveIPs, metricsAt, string(diagnosticsJSON), updateTarget, updateState, updateError, restartAck, restartAck, formatTime(now), nodeID)
 	if err != nil {
 		return err
 	}
@@ -1479,7 +1496,7 @@ func (s *Store) getRevision(ctx context.Context, profileID string, number int64)
 	return r, err
 }
 
-const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,applied_profile_id,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,traffic_accounting_enabled,traffic_records_enabled,traffic_auto_reset_enabled,traffic_reset_day,traffic_incoming_bytes,traffic_outgoing_bytes,traffic_reset_at,restart_nonce,sort_order,created_at,updated_at FROM nodes`
+const nodeSelect = `SELECT id,name,ingress_address,observed_address,COALESCE(profile_id,''),desired_revision,applied_revision,applied_profile_id,agent_version,status,apply_state,last_seen_at,online_since,last_error,ram_used_percent,cpu_used_percent,load_1,cpu_cores,network_rx_bps,network_tx_bps,active_ips,metrics_collected_at,diagnostics_json,update_target,update_state,update_error,traffic_accounting_enabled,traffic_records_enabled,traffic_auto_reset_enabled,traffic_reset_day,traffic_incoming_bytes,traffic_outgoing_bytes,traffic_reset_at,restart_nonce,tcp_tuning_enabled,tcp_memory_percent,ram_total_bytes,sort_order,created_at,updated_at FROM nodes`
 
 func scanNode(row scanner) (domain.Node, error) {
 	var n domain.Node
@@ -1487,7 +1504,7 @@ func scanNode(row scanner) (domain.Node, error) {
 	var created, updated string
 	var metrics domain.NodeMetrics
 	var diagnosticsJSON string
-	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AppliedProfileID, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &n.TrafficAccountingEnabled, &n.TrafficRecordsEnabled, &n.TrafficAutoResetEnabled, &n.TrafficResetDay, &n.TrafficIncomingBytes, &n.TrafficOutgoingBytes, &trafficResetAt, &n.RestartNonce, &n.SortOrder, &created, &updated)
+	err := row.Scan(&n.ID, &n.Name, &n.IngressAddress, &n.ObservedAddress, &n.ProfileID, &n.DesiredRevision, &n.AppliedRevision, &n.AppliedProfileID, &n.AgentVersion, &n.Status, &n.ApplyState, &lastSeen, &onlineSince, &n.LastError, &metrics.RAMUsedPercent, &metrics.CPUUsedPercent, &metrics.Load1, &metrics.CPUCores, &metrics.NetworkRxBPS, &metrics.NetworkTxBPS, &metrics.ActiveIPs, &metricsAt, &diagnosticsJSON, &n.UpdateTarget, &n.UpdateState, &n.UpdateError, &n.TrafficAccountingEnabled, &n.TrafficRecordsEnabled, &n.TrafficAutoResetEnabled, &n.TrafficResetDay, &n.TrafficIncomingBytes, &n.TrafficOutgoingBytes, &trafficResetAt, &n.RestartNonce, &n.TCPTuningEnabled, &n.TCPMemoryPercent, &metrics.RAMTotalBytes, &n.SortOrder, &created, &updated)
 	if err != nil {
 		return n, err
 	}

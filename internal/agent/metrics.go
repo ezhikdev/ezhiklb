@@ -53,10 +53,14 @@ func (c *MetricsCollector) Collect(ctx context.Context, runner Runner, services 
 	if err != nil { return domain.NodeMetrics{}, err }
 	rx, tx, err := readNetwork("/proc/net/dev")
 	if err != nil { return domain.NodeMetrics{}, err }
-	ram, err := readRAM("/proc/meminfo")
+	ramTotal, ramAvailable, err := readMemInfo(meminfoPath)
 	if err != nil { return domain.NodeMetrics{}, err }
+	ram := float64(ramTotal-min(ramAvailable, ramTotal)) * 100 / float64(ramTotal)
 	load := readLoad("/proc/loadavg")
+	// Online vCPUs are re-read every time: a VPS can be resized without a
+	// reboot, and runtime.NumCPU() is fixed when the agent starts.
 	cores := runtime.NumCPU()
+	if cpus, cpuErr := onlineCPUs(); cpuErr == nil { cores = len(cpus) }
 	if now.Sub(c.lastActiveIPsScan) >= activeIPsScanInterval {
 		for _, address := range readActiveIPVSClients("/proc/net/ip_vs_conn") { c.seenIPs[address] = now }
 		for _, address := range readActiveTCPClients(ctx, runner, services) { c.seenIPs[address] = now }
@@ -83,7 +87,7 @@ func (c *MetricsCollector) Collect(ctx context.Context, runner Runner, services 
 	// intentionally derived from load1/cores: showing /proc/stat utilization
 	// beside "load X / N vCPU" produced contradictory values for operators.
 	if cores > 0 { cpuPercent = load * 100 / float64(cores); if cpuPercent > 100 { cpuPercent = 100 } }
-	return domain.NodeMetrics{RAMUsedPercent: ram, CPUUsedPercent: cpuPercent, Load1: load, CPUCores: cores, NetworkRxBPS: rxBPS, NetworkTxBPS: txBPS, ActiveIPs: len(c.seenIPs), CollectedAt: now}, nil
+	return domain.NodeMetrics{RAMUsedPercent: ram, CPUUsedPercent: cpuPercent, Load1: load, CPUCores: cores, RAMTotalBytes: ramTotal, NetworkRxBPS: rxBPS, NetworkTxBPS: txBPS, ActiveIPs: len(c.seenIPs), CollectedAt: now}, nil
 }
 
 func readCPU(path string) (uint64, uint64, error) {

@@ -55,6 +55,7 @@ export const api = {
   requestHealthProbe: (id: string) => request<{ health_probe: number }>(`/api/v1/nodes/${id}/health-probe`, { method: "POST" }),
   requestNodeUpdate: (id: string) => request<{ version: string }>(`/api/v1/nodes/${id}/update`, { method: "POST" }),
   requestNodeRestart: (id: string) => request<{ restart_nonce: number }>(`/api/v1/nodes/${id}/restart`, { method: "POST" }),
+  updateNodeTCPTuning: (id: string, enabled: boolean, memoryPercent: number) => request<void>(`/api/v1/nodes/${id}/tcp-tuning`, { method: "PUT", body: JSON.stringify({ enabled, memory_percent: memoryPercent }) }),
   updateNodeTraffic: (id: string, accountingEnabled: boolean, recordsEnabled: boolean, autoResetEnabled: boolean, resetDay: number) => request<void>(`/api/v1/nodes/${id}/traffic`, { method: "PUT", body: JSON.stringify({ accounting_enabled: accountingEnabled, records_enabled: recordsEnabled, auto_reset_enabled: autoResetEnabled, reset_day: resetDay }) }),
   resetNodeTraffic: (id: string) => request<void>(`/api/v1/nodes/${id}/traffic/reset`, { method: "POST" }),
   trafficTotals: (nodeID = "") => requestArray<TrafficTotal>(`/api/v1/traffic${nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : ""}`),

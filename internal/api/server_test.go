@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -147,5 +148,45 @@ func TestProfileSwitchWithSameRevisionNumberReachesAgent(t *testing.T) {
 		if item.ID == node.ID && item.AppliedRevision == item.DesiredRevision {
 			t.Fatalf("node reported in sync before applying the new profile: %#v", item)
 		}
+	}
+}
+
+func TestTCPTuningReachesAgentThroughETag(t *testing.T) {
+	st, handler, node, token := testNodeServer(t)
+	path := "/agent/v1/nodes/" + node.ID + "/desired"
+	first := agentRequest(handler, "GET", path, token, "", "")
+	var desired domain.NodeDesiredState
+	if err := json.Unmarshal(first.Body.Bytes(), &desired); err != nil || desired.TCPTuning == nil || *desired.TCPTuning != domain.DefaultTCPTuning() {
+		t.Fatalf("new nodes must get 70%% automation: %s (%v)", first.Body, err)
+	}
+	// The agent builds its If-None-Match from what it applied (main.go).
+	agentTag := fmt.Sprintf(`"profile-%s-rev-%d-probe-%d-update-%s-restart-%d-ip-%s-tcp-%t-%d"`, desired.ProfileID, desired.Revision, desired.HealthProbe, desired.UpdateVersion, desired.RestartNonce, desired.IngressAddress, true, 70)
+	if etag := first.Header().Get("ETag"); etag != agentTag {
+		t.Fatalf("ETag %s does not match the agent's %s", etag, agentTag)
+	}
+	if response := agentRequest(handler, "GET", path, token, "", agentTag); response.Code != http.StatusNotModified {
+		t.Fatalf("unchanged state: %d", response.Code)
+	}
+	if err := st.UpdateTCPTuning(context.Background(), node.ID, false, 55); err != nil {
+		t.Fatal(err)
+	}
+	changed := agentRequest(handler, "GET", path, token, "", agentTag)
+	if err := json.Unmarshal(changed.Body.Bytes(), &desired); err != nil || changed.Code != http.StatusOK || *desired.TCPTuning != (domain.TCPTuning{Enabled: false, MemoryPercent: 55}) {
+		t.Fatalf("setting change was cached: %d %s", changed.Code, changed.Body)
+	}
+	for _, percent := range []int{0, 9, 91} {
+		if err := st.UpdateTCPTuning(context.Background(), node.ID, true, percent); err == nil {
+			t.Fatalf("%d%% accepted", percent)
+		}
+	}
+	// A 2.0.3 agent does not send the TCP part; its polls must stay 304.
+	old := httptest.NewRequest("GET", path, nil)
+	old.Header.Set("Authorization", "Bearer "+token)
+	old.Header.Set("X-EzhikLB-Agent-Version", "2.0.3")
+	old.Header.Set("If-None-Match", fmt.Sprintf(`"profile-%s-rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, desired.ProfileID, desired.Revision, desired.HealthProbe, desired.UpdateVersion, desired.RestartNonce, desired.IngressAddress))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, old)
+	if response.Code != http.StatusNotModified {
+		t.Fatalf("2.0.3 agent lost its 304: %d", response.Code)
 	}
 }

@@ -90,6 +90,7 @@ func (s *Server) PanelHandler() http.Handler {
 	mux.Handle("POST /api/v1/nodes/{id}/restart", s.admin(http.HandlerFunc(s.requestNodeRestart)))
 	mux.Handle("PUT /api/v1/nodes/{id}/traffic", s.admin(http.HandlerFunc(s.updateNodeTraffic)))
 	mux.Handle("POST /api/v1/nodes/{id}/traffic/reset", s.admin(http.HandlerFunc(s.resetNodeTraffic)))
+	mux.Handle("PUT /api/v1/nodes/{id}/tcp-tuning", s.admin(http.HandlerFunc(s.updateNodeTCPTuning)))
 	mux.Handle("GET /api/v1/traffic", s.admin(http.HandlerFunc(s.listTrafficTotals)))
 	mux.Handle("GET /api/v1/health", s.admin(http.HandlerFunc(s.listHealth)))
 	mux.Handle("GET /api/v1/stats", s.admin(http.HandlerFunc(s.listStats)))
@@ -573,6 +574,22 @@ func (s *Server) updateNodeTraffic(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err,store.ErrNotFound) { writeError(w,http.StatusNotFound,"not_found","Node not found") } else if err != nil { writeError(w,http.StatusUnprocessableEntity,"validation_failed",err.Error()) } else { w.WriteHeader(http.StatusNoContent) }
 }
 
+func (s *Server) updateNodeTCPTuning(w http.ResponseWriter, r *http.Request) {
+	var body domain.TCPTuning
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	err := s.store.UpdateTCPTuning(r.Context(), r.PathValue("id"), body.Enabled, body.MemoryPercent)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "Node not found")
+	} else if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", err.Error())
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func (s *Server) resetNodeTraffic(w http.ResponseWriter, r *http.Request) {
 	err := s.store.ResetTraffic(r.Context(),r.PathValue("id")); if errors.Is(err,store.ErrNotFound) { writeError(w,http.StatusNotFound,"not_found","Node not found") } else if err != nil { s.internalError(w,err) } else { w.WriteHeader(http.StatusNoContent) }
 }
@@ -679,6 +696,10 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	etag := DesiredStateETag(state)
+	if domain.CompareVersions(agentVersion, domain.TCPTuningMinAgentVersion) < 0 {
+		// Agents before 2.0.4 do not know the TCP tuning part of the tag.
+		etag = desiredStateETagBase(state) + `"`
+	}
 	if domain.CompareVersions(agentVersion, "2.0.0") < 0 {
 		// 1.x agents build their If-None-Match without the profile ID; keep
 		// their format so unchanged polls stay 304 responses.
@@ -699,8 +720,19 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 // unique within a profile, so the profile ID is part of the tag: switching
 // to another profile with the same revision number must reach the agent.
 // The agent computes the same tag from what it has applied.
+// Since 2.0.4 the node's TCP tuning setting is part of it, so a change made
+// in the panel reaches the agent without a profile publication.
 func DesiredStateETag(state domain.NodeDesiredState) string {
-	return fmt.Sprintf(`"profile-%s-rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, state.ProfileID, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce, state.IngressAddress)
+	tuning := domain.DefaultTCPTuning()
+	if state.TCPTuning != nil {
+		tuning = *state.TCPTuning
+	}
+	return desiredStateETagBase(state) + fmt.Sprintf(`-tcp-%t-%d"`, tuning.Enabled, tuning.MemoryPercent)
+}
+
+// desiredStateETagBase is the 2.0.0–2.0.3 tag without its closing quote.
+func desiredStateETagBase(state domain.NodeDesiredState) string {
+	return fmt.Sprintf(`"profile-%s-rev-%d-probe-%d-update-%s-restart-%d-ip-%s`, state.ProfileID, state.Revision, state.HealthProbe, state.UpdateVersion, state.RestartNonce, state.IngressAddress)
 }
 
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
@@ -865,6 +897,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "2.0.3"
+const Version = "2.0.4"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

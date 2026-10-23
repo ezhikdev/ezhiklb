@@ -89,6 +89,9 @@ type Reconciler struct {
 	statePath string
 	logger    *slog.Logger
 	mu        sync.Mutex
+	// rpsMask is the RPS mask this agent wrote last; queues still holding
+	// it are refreshed when the number of vCPUs changes.
+	rpsMask string
 }
 
 func NewReconciler(runner Runner, statePath string, logger *slog.Logger) *Reconciler {

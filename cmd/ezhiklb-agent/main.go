@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"strings"
 	"sync"
@@ -21,7 +22,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "2.0.3"
+const version = "2.0.4"
 
 type client struct {
 	baseURL string
@@ -55,7 +56,9 @@ func main() {
 	}
 	api := &client{baseURL: panelURL, token: token, http: &http.Client{Timeout: 15 * time.Second}}
 	runner := agent.ExecRunner{}
-	reconciler := agent.NewReconciler(runner, env("EZHIKLB_AGENT_STATE", "/var/lib/ezhiklb-agent/state.json"), logger)
+	statePath := env("EZHIKLB_AGENT_STATE", "/var/lib/ezhiklb-agent/state.json")
+	reconciler := agent.NewReconciler(runner, statePath, logger)
+	tcpTuner := agent.NewTCPMemoryTuner(logger, filepath.Join(filepath.Dir(statePath), "tcp-tuning.json"), reconciler.RetuneReceiveSteering)
 	monitor := agent.NewHealthMonitor(runner, reconciler, logger)
 	metricsCollector := agent.NewMetricsCollector()
 
@@ -111,6 +114,10 @@ func main() {
 		}
 		if time.Since(diagnosticsAt) >= time.Minute {
 			diagnostics = agent.CollectDiagnostics(ctx, runner, reconciler.Services(), reconciler.TrafficControls())
+			// Re-detects RAM, vCPUs and TCP memory every minute and adjusts
+			// tcp_mem, so a VPS resized without a reboot is picked up.
+			tcpStatus := tcpTuner.Tick()
+			diagnostics.TCPMemory = &tcpStatus
 			// Self-heal the hidden profile's inbound firewall: SSH/panel port
 			// changes and other tools rewriting INPUT are picked up here.
 			hidden, hiddenErr := reconciler.EnsureInputFirewall(ctx)
@@ -135,13 +142,19 @@ func main() {
 		if refreshingRestored {
 			knownRevision = 0
 		}
-		desired, changed, err := api.desired(ctx, nodeID, appliedProfile, knownRevision, lastHealthProbe, lastUpdateTarget, restartAck, appliedIngress)
+		desired, changed, err := api.desired(ctx, nodeID, appliedProfile, knownRevision, lastHealthProbe, lastUpdateTarget, restartAck, appliedIngress, tcpTuner.Settings())
 		if err != nil {
 			logger.Error("fetch desired state", "error", err)
 			return false
 		}
 		if !changed {
 			return false
+		}
+		// The TCP memory setting changes without a profile publication.
+		tuningChanged := false
+		if desired.TCPTuning != nil && tcpTuner.SetSettings(*desired.TCPTuning) {
+			tuningChanged = true
+			diagnosticsAt = time.Time{}
 		}
 		restoreNeedsProfile = false
 		lastUpdateTarget = desired.UpdateVersion
@@ -259,7 +272,7 @@ func main() {
 			logger.Info("manual health probe completed", "probe", desired.HealthProbe)
 			return true
 		}
-		return false
+		return tuningChanged
 	}
 
 	reconcile()
@@ -291,7 +304,7 @@ func main() {
 	}
 }
 
-func (c *client) desired(ctx context.Context, nodeID, knownProfile string, knownRevision, knownHealthProbe int64, knownUpdate string, knownRestart int64, knownIngress string) (domain.NodeDesiredState, bool, error) {
+func (c *client) desired(ctx context.Context, nodeID, knownProfile string, knownRevision, knownHealthProbe int64, knownUpdate string, knownRestart int64, knownIngress string, knownTuning domain.TCPTuning) (domain.NodeDesiredState, bool, error) {
 	var result domain.NodeDesiredState
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/v1/nodes/"+nodeID+"/desired", nil)
 	if err != nil {
@@ -300,7 +313,7 @@ func (c *client) desired(ctx context.Context, nodeID, knownProfile string, known
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	request.Header.Set("X-EzhikLB-Agent-Version", version)
 	// Must match api.DesiredStateETag for the applied state.
-	request.Header.Set("If-None-Match", fmt.Sprintf(`"profile-%s-rev-%d-probe-%d-update-%s-restart-%d-ip-%s"`, knownProfile, knownRevision, knownHealthProbe, knownUpdate, knownRestart, knownIngress))
+	request.Header.Set("If-None-Match", fmt.Sprintf(`"profile-%s-rev-%d-probe-%d-update-%s-restart-%d-ip-%s-tcp-%t-%d"`, knownProfile, knownRevision, knownHealthProbe, knownUpdate, knownRestart, knownIngress, knownTuning.Enabled, knownTuning.MemoryPercent))
 	response, err := c.http.Do(request)
 	if err != nil {
 		return result, false, err

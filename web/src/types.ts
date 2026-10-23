@@ -104,6 +104,8 @@ export interface NodeInfo {
   traffic_outgoing_bytes: number
   traffic_reset_at?: string
   restart_nonce?: number
+  tcp_tuning_enabled: boolean
+  tcp_memory_percent: number
   updated_at: string
   sort_order: number
 }
@@ -122,7 +124,32 @@ export interface NodeDiagnostics {
   hidden_mode?: boolean
   input_firewall_ready?: boolean
   allowed_input_ports?: number[]
+  /** Reported by 2.0.4+ agents. */
+  tcp_memory?: TCPMemoryStatus
   error?: string
+  checked_at: string
+}
+
+export interface TCPMemoryEvent {
+  at: string
+  level: "info" | "warning"
+  message: string
+}
+
+/** Kernel TCP buffer memory (net.ipv4.tcp_mem); limit_bytes are low, pressure and max. */
+export interface TCPMemoryStatus {
+  automatic: boolean
+  percent: number
+  adaptive_percent: number
+  ram_bytes: number
+  available_bytes: number
+  cpus: number
+  limit_bytes: [number, number, number]
+  used_bytes: number
+  ceiling_bytes: number
+  pressure_events: number
+  warning?: string
+  events?: TCPMemoryEvent[]
   checked_at: string
 }
 
@@ -131,6 +158,7 @@ export interface NodeMetrics {
   cpu_used_percent: number
   load_1: number
   cpu_cores: number
+  ram_total_bytes?: number
   network_rx_bps: number
   network_tx_bps: number
   active_ips: number

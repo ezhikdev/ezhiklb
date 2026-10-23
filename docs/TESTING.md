@@ -343,3 +343,30 @@ hidden profile holding one SNI record (`a.test`) and Host records `cdn.test`,
     `http://*/xhttp`.
 97. The 2.0.2 regression suite (`e2e.py`, 47 checks) passes after the upgrade
     from 2.0.2 with `install.sh`.
+
+## 2.0.4 acceptance checks — TCP buffer memory
+
+98. Unit tests (`tcpmem_test.go`, fake `/proc`): the kernel default is raised
+    to 50/60/70% of RAM; disabled automation leaves `tcp_mem` and still warns
+    on pressure; pressure near the threshold widens the limit by 5% steps up
+    to RAM minus the reserve (85% on 4 GiB) and then warns; OOM kills, PSI
+    >= 10% or low `MemAvailable` block expansion; 90% is capped with a
+    warning, and a 1 GiB node keeps 512 MiB; a lower percentage waits while
+    usage is above the new low threshold; a larger manual value is kept;
+    RAM/vCPU changes are reported and trigger the RPS retune; settings
+    persist; repeated events are merged; a missing `tcp_mem` is reported.
+99. API: new nodes get `tcp_tuning` on/70 in the desired state; the ETag
+    matches the agent's `If-None-Match`; a setting change is not served from
+    cache; 0/9/91% are rejected; a 2.0.3 agent keeps getting `304`.
+100. Stand (`e2e_tcp.py`, 15 checks): after `install.sh` 2.0.4 the agent
+     reports RAM, vCPU and `ram_total_bytes`; in the container it reports
+     `tcp_mem` as unavailable; 5/95/0% get `422`; a saved setting reaches the
+     agent within a minute without publication, appears in its event log, is
+     stored in `tcp-tuning.json`, survives an agent restart, and is audited.
+     `e2e.py` (47) and `e2e_http.py` (22) still pass.
+101. On a real (non-container) node under load: `sysctl net.ipv4.tcp_mem`
+     shows 50/60/70% of RAM in pages within a minute of the agent start, and
+     `nstat TcpExtTCPMemoryPressures` stops growing.
+102. UI: the node list marks a node under TCP memory pressure; the node card
+     shows usage against the limits, thresholds, adaptive badge, settings and
+     log in both themes and at phone width.

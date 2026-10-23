@@ -211,6 +211,9 @@ type Node struct {
 	TrafficOutgoingBytes     uint64   `json:"traffic_outgoing_bytes"`
 	TrafficResetAt           *time.Time `json:"traffic_reset_at,omitempty"`
 	RestartNonce             int64    `json:"restart_nonce,omitempty"`
+	// TCP memory tuning settings the agent receives with the desired state.
+	TCPTuningEnabled bool `json:"tcp_tuning_enabled"`
+	TCPMemoryPercent int  `json:"tcp_memory_percent"`
 	SortOrder       int              `json:"sort_order"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
@@ -233,7 +236,56 @@ type NodeDiagnostics struct {
 	HiddenMode         bool      `json:"hidden_mode,omitempty"`
 	InputFirewallReady bool      `json:"input_firewall_ready,omitempty"`
 	AllowedInputPorts  []uint16  `json:"allowed_input_ports,omitempty"`
-	CheckedAt          time.Time `json:"checked_at"`
+	// TCPMemory is reported by 2.0.4+ agents.
+	TCPMemory *TCPMemoryStatus `json:"tcp_memory,omitempty"`
+	CheckedAt time.Time        `json:"checked_at"`
+}
+
+// Kernel TCP buffer memory (net.ipv4.tcp_mem). The kernel default is sized
+// for an ordinary server; a proxy holding two sockets per client runs into it
+// and then prunes queued packets, which looks like heavy network loss.
+const (
+	TCPMemoryDefaultPercent = 70
+	TCPMemoryMinPercent     = 10
+	TCPMemoryMaxPercent     = 90
+	// TCPTuningMinAgentVersion is the first agent that manages tcp_mem.
+	TCPTuningMinAgentVersion = "2.0.4"
+)
+
+// TCPTuning is the per-node setting sent to the agent.
+type TCPTuning struct {
+	Enabled       bool `json:"enabled"`
+	MemoryPercent int  `json:"memory_percent"`
+}
+
+// DefaultTCPTuning is what an agent applies before the panel answers.
+func DefaultTCPTuning() TCPTuning {
+	return TCPTuning{Enabled: true, MemoryPercent: TCPMemoryDefaultPercent}
+}
+
+// TCPMemoryStatus is the agent's view of TCP buffer memory. Byte values are
+// converted from kernel pages; LimitBytes are tcp_mem's low, pressure and
+// hard limits.
+type TCPMemoryStatus struct {
+	Automatic       bool             `json:"automatic"`
+	Percent         int              `json:"percent"`
+	AdaptivePercent int              `json:"adaptive_percent"`
+	RAMBytes        uint64           `json:"ram_bytes"`
+	AvailableBytes  uint64           `json:"available_bytes"`
+	CPUs            int              `json:"cpus"`
+	LimitBytes      [3]uint64        `json:"limit_bytes"`
+	UsedBytes       uint64           `json:"used_bytes"`
+	CeilingBytes    uint64           `json:"ceiling_bytes"`
+	PressureEvents  uint64           `json:"pressure_events"`
+	Warning         string           `json:"warning,omitempty"`
+	Events          []TCPMemoryEvent `json:"events,omitempty"`
+	CheckedAt       time.Time        `json:"checked_at"`
+}
+
+type TCPMemoryEvent struct {
+	At      time.Time `json:"at"`
+	Level   string    `json:"level"`
+	Message string    `json:"message"`
 }
 
 type NodeMetrics struct {
@@ -241,6 +293,7 @@ type NodeMetrics struct {
 	CPUUsedPercent float64   `json:"cpu_used_percent"`
 	Load1          float64   `json:"load_1"`
 	CPUCores       int       `json:"cpu_cores"`
+	RAMTotalBytes  uint64    `json:"ram_total_bytes,omitempty"`
 	NetworkRxBPS   uint64    `json:"network_rx_bps"`
 	NetworkTxBPS   uint64    `json:"network_tx_bps"`
 	ActiveIPs      int       `json:"active_ips"`
@@ -285,6 +338,7 @@ type NodeDesiredState struct {
 	Decommission     bool          `json:"decommission"`
 	UpdateVersion    string        `json:"update_version,omitempty"`
 	RestartNonce     int64         `json:"restart_nonce,omitempty"`
+	TCPTuning        *TCPTuning    `json:"tcp_tuning,omitempty"`
 	Config           ProfileConfig `json:"config"`
 }
 

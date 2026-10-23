@@ -199,6 +199,39 @@ the agent writes the all-CPU mask, sets `rps_flow_cnt` and raises
 `net.core.rps_sock_flow_entries` to 65536 (RFS). Administrator masks and larger
 values are kept; failures (read-only sysfs in containers) are only logged.
 
+### TCP buffer memory (2.0.4)
+
+`internal/agent/tcpmem.go` manages `net.ipv4.tcp_mem`. The kernel default is
+about 9% of RAM; a proxy holding two sockets per client exhausts it, the kernel
+then shrinks windows and prunes received packets (`OfoPruned`, `TCPRcvQDrop`),
+and throughput collapses with an idle CPU and no NIC/softnet/qdisc drops.
+
+The agent's minute diagnostics call `TCPMemoryTuner.Tick`:
+
+- re-read `MemTotal`/`MemAvailable`, online CPUs, `tcp_mem`, TCP pages in
+  `/proc/net/sockstat`, `TcpExt TCPMemoryPressures`, `oom_kill` and memory
+  PSI. A changed vCPU count calls `Reconciler.RetuneReceiveSteering`, which
+  rewrites RPS masks still holding the mask the agent wrote before;
+- target hard limit = (percent + adaptive) % of RAM, capped at RAM minus a
+  reserve of max(512 MiB, 15% RAM); low and pressure are 5/7 and 6/7 of it
+  (50/60/70% for the default 70%);
+- adaptive step +5% when pressure events grew since the last check, usage is
+  at >= 90% of the pressure threshold, the step fits under the cap, no OOM
+  kill happened, PSI `some avg10` < 10 and `MemAvailable` covers the reserve
+  plus the growth;
+- raises are written at once. Lowering (a smaller percentage, less RAM) waits
+  until usage is below the new low threshold, and a current value that the
+  agent did not write is never lowered;
+- events (deduplicated for 10 minutes) go to the journal and to the last 20
+  entries in `NodeDiagnostics.TCPMemory`.
+
+The setting (`nodes.tcp_tuning_enabled`, `nodes.tcp_memory_percent`, default
+on/70) travels in `NodeDesiredState.TCPTuning` and in the desired-state ETag
+(`...-tcp-<enabled>-<percent>`) for agents >= 2.0.4; older agents get the
+2.0.3 tag. The agent persists it in `tcp-tuning.json` next to `state.json`.
+Inside a container network namespace `tcp_mem` does not exist; the status
+says so and nothing is changed.
+
 ## Security boundary
 
 The panel runs unprivileged. Only the agent runs as root. The panel never sends
