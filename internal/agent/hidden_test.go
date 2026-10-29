@@ -210,12 +210,12 @@ func TestRenderInputRules(t *testing.T) {
 	for port := uint16(1000); port < 1020; port++ {
 		ports = append(ports, port)
 	}
-	rules := renderInputRules(ports, false)
+	rules := renderInputRules(ports, []uint16{443}, false)
 	lines := strings.Split(strings.TrimSpace(rules), "\n")
 	if lines[len(lines)-2] != "-A EZHIKLB-INPUT -j DROP" || lines[len(lines)-1] != "COMMIT" {
 		t.Fatalf("DROP must be the final rule:\n%s", rules)
 	}
-	for _, expected := range []string{"-i lo -j RETURN", "--ctstate ESTABLISHED,RELATED -j RETURN", "-p icmp -j RETURN", "--sport 67 --dport 68", "--dports 1000,1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1014 -j RETURN", "--dports 1015,1016,1017,1018,1019 -j RETURN"} {
+	for _, expected := range []string{"-i lo -j RETURN", "--ctstate ESTABLISHED,RELATED -j RETURN", "-p icmp -j RETURN", "--sport 67 --dport 68", "--dports 1000,1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1014 -j RETURN", "--dports 1015,1016,1017,1018,1019 -j RETURN", "-p udp -m multiport --dports 443 -j RETURN"} {
 		if !strings.Contains(rules, expected) {
 			t.Fatalf("rules do not contain %q:\n%s", expected, rules)
 		}
@@ -223,8 +223,75 @@ func TestRenderInputRules(t *testing.T) {
 	if strings.Contains(rules, "ACCEPT") {
 		t.Fatalf("the chain must only narrow the host policy:\n%s", rules)
 	}
-	if v6 := renderInputRules([]uint16{22}, true); !strings.Contains(v6, "-p ipv6-icmp -j RETURN") || strings.Contains(v6, "-p icmp ") {
+	if v6 := renderInputRules([]uint16{22}, nil, true); !strings.Contains(v6, "-p ipv6-icmp -j RETURN") || strings.Contains(v6, "-p icmp ") {
 		t.Fatalf("IPv6 rules must keep neighbour discovery working:\n%s", v6)
+	}
+	if plain := renderInputRules([]uint16{22}, nil, false); strings.Contains(plain, "-p udp -m multiport") {
+		t.Fatalf("UDP opened without a hidden UDP record:\n%s", plain)
+	}
+}
+
+func hiddenUDPListener(id string, port uint16) domain.Listener {
+	return domain.Listener{ID: id, Name: id, Enabled: true, ListenPort: port, Protocols: []domain.Protocol{domain.ProtocolUDP}, Scheduler: "wrr", AffinitySecs: 300,
+		Backends: []domain.Backend{{ID: id + "-b", Address: "192.0.2.10", Port: 51820, Weight: 1, Enabled: true}}}
+}
+
+func TestCompileHiddenUDPServices(t *testing.T) {
+	config := hiddenConfig()
+	config.Listeners = append(config.Listeners, hiddenUDPListener("udp443", 443), hiddenUDPListener("udp80", 80))
+	services := compileServices(config, "198.51.100.10")
+	udp := onlyProtocol(services, domain.ProtocolUDP)
+	if len(udp) != 2 || len(onlyProtocol(services, domain.ProtocolTCP)) != 2 {
+		t.Fatalf("services = %#v, want two SNI records and two UDP records", services)
+	}
+	for _, service := range udp {
+		if service.Address != "198.51.100.10" || service.SNI != "" || service.HTTPRoute || len(service.Destinations) != 1 || service.AffinitySecs != 300 {
+			t.Fatalf("hidden UDP record must be a plain IPVS service on the ingress address: %#v", service)
+		}
+	}
+	if ports := hiddenUDPPorts(services); !slices.Equal(ports, []uint16{80, 443}) {
+		t.Fatalf("UDP ports = %v", ports)
+	}
+}
+
+func TestHiddenReconcileOpensUDPRecordPorts(t *testing.T) {
+	runner := &scriptedRunner{outputs: map[string]string{}}
+	r := NewReconciler(runner, filepath.Join(t.TempDir(), "state.json"), nil)
+	ctx := context.Background()
+	config := hiddenConfig()
+	config.Listeners = append(config.Listeners, hiddenUDPListener("udp443", 443))
+	if err := r.Reconcile(ctx, domain.NodeDesiredState{Revision: 1, Config: config}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(runner.calls, func(call recordedCall) bool {
+		return call.name == "ipvsadm" && strings.Contains(strings.Join(call.args, " "), "-u 198.51.100.10:443")
+	}) {
+		t.Fatalf("IPVS UDP service not created: %#v", runner.calls)
+	}
+	// UDP records never reach HAProxy: the SNI frontend keeps TCP 80/443.
+	if haproxy, err := os.ReadFile(r.haProxyConfigPath()); err != nil || strings.Contains(string(haproxy), "udp443") {
+		t.Fatalf("UDP record rendered into HAProxy: %v\n%s", err, haproxy)
+	}
+	rules := runner.inputOf("iptables-restore", "EZHIKLB-INPUT")
+	if !strings.Contains(rules, "-A EZHIKLB-INPUT -p udp -m multiport --dports 443 -j RETURN") || !strings.Contains(rules, "-p tcp -m multiport --dports 22,80,443 -j RETURN") {
+		t.Fatalf("UDP record port not opened:\n%s", rules)
+	}
+	if v6 := runner.inputOf("ip6tables-restore", "EZHIKLB-INPUT"); strings.Contains(v6, "-p udp -m multiport") {
+		t.Fatalf("IPv6 must stay closed for UDP:\n%s", v6)
+	}
+
+	// Removing the UDP record closes the port again.
+	runner.calls = nil
+	if err := r.Reconcile(ctx, domain.NodeDesiredState{Revision: 2, Config: hiddenConfig()}); err != nil {
+		t.Fatal(err)
+	}
+	if rules := runner.inputOf("iptables-restore", "EZHIKLB-INPUT"); rules == "" || strings.Contains(rules, "-p udp -m multiport") {
+		t.Fatalf("UDP port stayed open after the record was removed:\n%s", rules)
+	}
+	if !slices.ContainsFunc(runner.calls, func(call recordedCall) bool {
+		return call.name == "ipvsadm" && strings.HasPrefix(strings.Join(call.args, " "), "-D -u 198.51.100.10:443")
+	}) {
+		t.Fatalf("IPVS UDP service not removed: %#v", runner.calls)
 	}
 }
 
@@ -307,6 +374,26 @@ func TestEnsureInputFirewallTracksPortChanges(t *testing.T) {
 	}
 	if state, _ := r.loadState(); !slices.Equal(state.InputPorts, []uint16{22, 80, 443, 2200}) {
 		t.Fatalf("new SSH port not persisted: %v", state.InputPorts)
+	}
+
+	// A chain that lost its UDP rule (e.g. rewritten by another tool) is
+	// re-applied even though the TCP ports did not change.
+	udpService := Service{Protocol: domain.ProtocolUDP, Address: "198.51.100.10", Port: 443, Scheduler: "wrr", ListenerID: "udp"}
+	if err := r.saveState(AppliedState{Hidden: true, InputPorts: []uint16{22, 80, 443, 2200}, Services: []Service{udpService}}); err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	diagnostics, err = r.EnsureInputFirewall(ctx)
+	if !strings.Contains(runner.inputOf("iptables-restore", "EZHIKLB-INPUT"), "-p udp -m multiport --dports 443 -j RETURN") {
+		t.Fatalf("missing UDP rule not repaired: %#v", runner.calls)
+	}
+	// The scripted chain listing still lacks the UDP rule: not ready.
+	if !slices.Equal(diagnostics.AllowedInputUDPPorts, []uint16{443}) || diagnostics.InputFirewallReady || err == nil {
+		t.Fatalf("diagnostics = %#v, %v", diagnostics, err)
+	}
+	runner.outputs["iptables -w 5 -S EZHIKLB-INPUT"] = "-N EZHIKLB-INPUT\n-A EZHIKLB-INPUT -p udp -m multiport --dports 443 -j RETURN\n-A EZHIKLB-INPUT -j DROP\n"
+	if diagnostics, err := r.EnsureInputFirewall(ctx); err != nil || !diagnostics.InputFirewallReady {
+		t.Fatalf("diagnostics = %#v, %v", diagnostics, err)
 	}
 }
 

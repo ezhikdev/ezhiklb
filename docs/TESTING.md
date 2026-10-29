@@ -370,3 +370,28 @@ hidden profile holding one SNI record (`a.test`) and Host records `cdn.test`,
 102. UI: the node list marks a node under TCP memory pressure; the node card
      shows usage against the limits, thresholds, adaptive badge, settings and
      log in both themes and at phone width.
+
+## 2.0.5 acceptance checks — UDP records in hidden profiles
+
+103. Unit tests: a hidden profile accepts UDP records on 80 and 443 next to
+     SNI records and ignores their leftover SNI/Host/path; another port, two
+     UDP records on one port, TCP+UDP in one record and a rate limit are
+     rejected; UDP records compile to plain IPVS UDP services on the ingress
+     address and never reach HAProxy; `EZHIKLB-INPUT` gets the UDP RETURN
+     rule on IPv4 only and loses it when the record is removed; a chain
+     without the UDP rule is re-applied by `EnsureInputFirewall`; publishing
+     UDP records to a 2.0.0 agent returns `ErrHiddenUDPUnsupported`.
+104. Stand (`e2e_udp.py`, 25 checks): bad UDP records get `422`; a profile
+     with an SNI record, UDP 443 and UDP 80 applies; UDP 443 and UDP 80 echo
+     from their own backends while TCP 443 SNI and TCP 80 keep working; IPVS
+     shows UDP services on 80/443 and no TCP 443 service; the IPv4 chain has
+     `-p udp -m multiport --dports 80,443 -j RETURN`, IPv6 has no UDP rule and
+     no host socket is opened; deleting the UDP rule by hand drops UDP 443
+     until the agent restores it within a minute; diagnostics list UDP 80/443;
+     statistics include UDP 443; removing UDP 80 and then all UDP records
+     closes the ports and removes the IPVS services. `e2e.py` (47) and
+     `e2e_http.py` (22) still pass.
+105. UI: the record dialog of a hidden profile offers "SNI · TLS",
+     "Host · HTTP" and "UDP · порт" in one row; a UDP record picks port 80 or
+     443, shows a port-taken error, and the rule list shows "UDP · порт 443";
+     checked in both themes and at phone width.

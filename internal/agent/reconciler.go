@@ -186,11 +186,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired domain.NodeDesiredSt
 	if desired.Config.Hidden {
 		ports, err := r.detectInputPorts(ctx)
 		if err == nil {
-			err = r.applyInputFirewall(ctx, ports)
+			err = r.applyInputFirewall(ctx, ports, hiddenUDPPorts(services))
 		}
 		if err != nil {
 			if old.Hidden {
-				_ = r.applyInputFirewall(ctx, old.InputPorts)
+				_ = r.applyInputFirewall(ctx, old.InputPorts, hiddenUDPPorts(old.Services))
 			} else {
 				_ = r.removeInputFirewall(ctx)
 			}
@@ -364,7 +364,7 @@ func (r *Reconciler) Restore(ctx context.Context) (int64, error) {
 			ports = append(ports, detected...)
 		}
 		ports = normalizePorts(ports)
-		if err := r.applyInputFirewall(ctx, ports); err != nil { return 0, fmt.Errorf("restore hidden profile inbound firewall: %w", err) }
+		if err := r.applyInputFirewall(ctx, ports, hiddenUDPPorts(state.Services)); err != nil { return 0, fmt.Errorf("restore hidden profile inbound firewall: %w", err) }
 		state.InputPorts = ports
 	}
 	controls, err := r.reconcileTrafficControl(ctx, state.TrafficControls, onlyProtocol(state.Services, domain.ProtocolUDP))
@@ -561,6 +561,21 @@ func compileServices(config domain.ProfileConfig, vip string) []Service {
 	var result []Service
 	for _, listener := range config.Listeners {
 		if !listener.Enabled {
+			continue
+		}
+		if config.Hidden && domain.HiddenUDP(listener) {
+			// A hidden UDP record is a plain IPVS service on its own hidden
+			// port; TCP on that port stays with the shared SNI frontend.
+			service := Service{Protocol: domain.ProtocolUDP, Address: vip, Port: listener.ListenPort, Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs, ListenerID: listener.ID}
+			for _, backend := range listener.Backends {
+				if backend.Enabled {
+					service.Destinations = append(service.Destinations, Destination{ID: backend.ID, Address: backend.Address, Port: backend.Port, Weight: backend.Weight})
+				}
+			}
+			sort.Slice(service.Destinations, func(i, j int) bool {
+				return destinationKey(service.Destinations[i]) < destinationKey(service.Destinations[j])
+			})
+			result = append(result, service)
 			continue
 		}
 		if config.Hidden {

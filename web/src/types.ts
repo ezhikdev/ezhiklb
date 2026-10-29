@@ -124,6 +124,7 @@ export interface NodeDiagnostics {
   hidden_mode?: boolean
   input_firewall_ready?: boolean
   allowed_input_ports?: number[]
+  allowed_input_udp_ports?: number[]
   /** Reported by 2.0.4+ agents. */
   tcp_memory?: TCPMemoryStatus
   error?: string

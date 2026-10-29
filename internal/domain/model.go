@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -71,7 +73,8 @@ type Listener struct {
 type ProfileConfig struct {
 	SchemaVersion int  `json:"schema_version"`
 	// Hidden profiles accept TCP on HiddenPorts only, route every connection
-	// by TLS SNI and close the node's other unneeded inbound ports.
+	// by TLS SNI and close the node's other unneeded inbound ports. A hidden
+	// profile may also forward plain UDP on HiddenPorts (see HiddenUDP).
 	Hidden      bool        `json:"hidden,omitempty"`
 	HealthCheck HealthCheck `json:"health_check"`
 	Listeners   []Listener  `json:"listeners"`
@@ -87,6 +90,18 @@ const HiddenMinAgentVersion = "2.0.0"
 // HTTPRouteMinAgentVersion is the first agent that routes hidden records by
 // HTTP Host and path.
 const HTTPRouteMinAgentVersion = "2.0.3"
+
+// HiddenUDPMinAgentVersion is the first agent that forwards UDP records of a
+// hidden profile and opens their ports in the inbound firewall.
+const HiddenUDPMinAgentVersion = "2.0.5"
+
+// HiddenUDP reports whether a hidden-profile record forwards plain UDP on its
+// ListenPort (one of HiddenPorts) instead of joining the SNI/Host frontend.
+// UDP has no SNI or Host, so the port alone selects the record; TCP on the
+// same port keeps going to the shared frontend.
+func HiddenUDP(listener Listener) bool {
+	return len(listener.Protocols) == 1 && listener.Protocols[0] == ProtocolUDP
+}
 
 var sniLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
@@ -236,6 +251,8 @@ type NodeDiagnostics struct {
 	HiddenMode         bool      `json:"hidden_mode,omitempty"`
 	InputFirewallReady bool      `json:"input_firewall_ready,omitempty"`
 	AllowedInputPorts  []uint16  `json:"allowed_input_ports,omitempty"`
+	// AllowedInputUDPPorts are the hidden UDP record ports (IPv4 only).
+	AllowedInputUDPPorts []uint16 `json:"allowed_input_udp_ports,omitempty"`
 	// TCPMemory is reported by 2.0.4+ agents.
 	TCPMemory *TCPMemoryStatus `json:"tcp_memory,omitempty"`
 	CheckedAt time.Time        `json:"checked_at"`
@@ -527,7 +544,11 @@ func validateListenerSockets(prefix string, listener Listener, serviceKeys map[s
 // validateHiddenListener checks a hidden-profile record. Its socket is fixed
 // (TCP on HiddenPorts), so only the route has to be valid and unique: an SNI
 // record needs a host name; an HTTP record needs a Host, a path or both.
+// A UDP record instead owns one of HiddenPorts outright.
 func validateHiddenListener(prefix string, listener Listener, owners map[string]string) []string {
+	if HiddenUDP(listener) {
+		return validateHiddenUDPListener(prefix, listener, owners)
+	}
 	var problems []string
 	valid := true
 	host, path := strings.TrimSpace(listener.SNI), strings.TrimSpace(listener.Path)
@@ -563,12 +584,55 @@ func validateHiddenListener(prefix string, listener Listener, owners map[string]
 		owners[label] = listener.ID
 	}
 	if len(listener.Protocols) != 1 || listener.Protocols[0] != ProtocolTCP {
-		problems = append(problems, prefix+".protocols must be tcp in a hidden profile")
+		problems = append(problems, prefix+".protocols must be tcp or udp in a hidden profile")
 	}
 	if listener.RateLimitEnabled {
 		problems = append(problems, prefix+".rate_limit is not available in a hidden profile")
 	}
 	return problems
+}
+
+// validateHiddenUDPListener checks a UDP record of a hidden profile: it
+// listens on one of HiddenPorts, and each port has at most one UDP record.
+// SNI, Host and path are ignored (kept only so switching the record back to
+// TCP does not lose them).
+func validateHiddenUDPListener(prefix string, listener Listener, owners map[string]string) []string {
+	var problems []string
+	if !slices.Contains(HiddenPorts, listener.ListenPort) {
+		problems = append(problems, fmt.Sprintf("%s.listen_port must be %s for a UDP record in a hidden profile", prefix, hiddenPortList()))
+	} else {
+		key := fmt.Sprintf("udp/%d", listener.ListenPort)
+		if owner, exists := owners[key]; exists {
+			problems = append(problems, fmt.Sprintf("%s UDP port %d is already used by listener %s", prefix, listener.ListenPort, owner))
+		}
+		owners[key] = listener.ID
+	}
+	if listener.RateLimitEnabled {
+		problems = append(problems, prefix+".rate_limit is not available in a hidden profile")
+	}
+	return problems
+}
+
+func hiddenPortList() string {
+	values := make([]string, 0, len(HiddenPorts))
+	for _, port := range HiddenPorts {
+		values = append(values, strconv.Itoa(int(port)))
+	}
+	return strings.Join(values, " or ")
+}
+
+// HasHiddenUDP reports whether a hidden profile forwards UDP, which needs
+// agent HiddenUDPMinAgentVersion.
+func (c ProfileConfig) HasHiddenUDP() bool {
+	if !c.Hidden {
+		return false
+	}
+	for _, listener := range c.Listeners {
+		if HiddenUDP(listener) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasHTTPRoutes reports whether a hidden profile routes any record by HTTP
@@ -578,7 +642,7 @@ func (c ProfileConfig) HasHTTPRoutes() bool {
 		return false
 	}
 	for _, listener := range c.Listeners {
-		if listener.MatchHost {
+		if listener.MatchHost && !HiddenUDP(listener) {
 			return true
 		}
 	}

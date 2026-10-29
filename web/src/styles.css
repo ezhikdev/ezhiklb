@@ -415,8 +415,8 @@ h3 { font-size: 15px; }
 .listener-card__identity { width: min(390px, calc(100% - 56px)); display: flex; align-items: center; gap: 11px; }
 .listener-card__identity .input { font-weight: 600; }
 .listener-fields { grid-template-columns: 1fr .65fr .8fr .65fr; }
-.protocol-toggle { height: 44px; display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border); border-radius: 8px; padding: 3px; background: var(--input-bg); }
-.protocol-toggle button { border: 0; border-radius: 5px; background: transparent; color: var(--quiet); font: 600 13px var(--mono); }
+.protocol-toggle { height: 44px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border: 1px solid var(--border); border-radius: 8px; padding: 3px; background: var(--input-bg); }
+.protocol-toggle button { border: 0; border-radius: 5px; background: transparent; color: var(--quiet); font: 600 13px var(--mono); padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .protocol-toggle button[aria-pressed="true"] { background: var(--surface-raised); color: var(--foreground); box-shadow: 0 1px 4px color-mix(in srgb, var(--shade) 30%, transparent); }
 .backend-table-wrap { overflow-x: auto; }
 .backend-table { width: 100%; border-collapse: collapse; min-width: 630px; }

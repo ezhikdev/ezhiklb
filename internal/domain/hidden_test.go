@@ -49,7 +49,7 @@ func TestHiddenProfileRequiresUniqueValidSNI(t *testing.T) {
 		"missing SNI":       {hiddenListener("a", "")},
 		"invalid SNI":       {hiddenListener("a", "not a host")},
 		"duplicate SNI":     {hiddenListener("a", "a.example.com"), hiddenListener("b", "A.Example.com")},
-		"UDP record":        {func() Listener { l := hiddenListener("a", "a.example.com"); l.Protocols = []Protocol{ProtocolUDP}; return l }()},
+		"TCP and UDP record": {func() Listener { l := hiddenListener("a", "a.example.com"); l.Protocols = []Protocol{ProtocolTCP, ProtocolUDP}; return l }()},
 		"rate limit":        {func() Listener { l := hiddenListener("a", "a.example.com"); l.RateLimitEnabled, l.RateLimitMbps = true, 100; return l }()},
 		"no enabled backend": {func() Listener { l := hiddenListener("a", "a.example.com"); l.Backends[0].Enabled = false; return l }()},
 	}
@@ -132,6 +132,48 @@ func TestHiddenHTTPRoutesRejected(t *testing.T) {
 		config.Listeners = listeners
 		if err := config.Validate(); err == nil {
 			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func hiddenUDPListener(id string, port uint16) Listener {
+	l := hiddenListener(id, "")
+	l.ListenPort, l.Protocols = port, []Protocol{ProtocolUDP}
+	return l
+}
+
+func TestHiddenUDPRecords(t *testing.T) {
+	config := DefaultProfileConfig()
+	config.Hidden = true
+	// UDP on 443 and 80 coexists with TCP SNI records on the same ports;
+	// leftover SNI/Host/path values of a UDP record are not validated.
+	leftover := hiddenUDPListener("u80", 80)
+	leftover.SNI, leftover.MatchHost, leftover.Path = "not a host", true, "bad path"
+	config.Listeners = []Listener{hiddenListener("a", "a.example.com"), hiddenUDPListener("u443", 443), leftover}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("hidden UDP records rejected: %v", err)
+	}
+	if !config.HasHiddenUDP() || config.HasHTTPRoutes() {
+		t.Fatalf("HasHiddenUDP = %v, HasHTTPRoutes = %v", config.HasHiddenUDP(), config.HasHTTPRoutes())
+	}
+	config.Hidden = false
+	if config.HasHiddenUDP() {
+		t.Fatal("a regular profile reported hidden UDP records")
+	}
+}
+
+func TestHiddenUDPRecordsRejected(t *testing.T) {
+	cases := map[string][]Listener{
+		"other port":     {hiddenUDPListener("u", 51820)},
+		"duplicate port": {hiddenUDPListener("u1", 443), hiddenUDPListener("u2", 443)},
+		"rate limit":     {func() Listener { l := hiddenUDPListener("u", 443); l.RateLimitEnabled, l.RateLimitMbps = true, 100; return l }()},
+	}
+	for name, listeners := range cases {
+		config := DefaultProfileConfig()
+		config.Hidden = true
+		config.Listeners = listeners
+		if err := config.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

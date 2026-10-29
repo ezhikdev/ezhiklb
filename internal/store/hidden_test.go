@@ -119,6 +119,18 @@ func TestHiddenProfileRequiresCapableAgents(t *testing.T) {
 	if err != nil || !desired.Config.Hidden || desired.Config.Listeners[1].SNI != "b.example.com" {
 		t.Fatalf("desired = %#v, %v", desired.Config, err)
 	}
+
+	// UDP records need a newer agent than the hidden profile itself.
+	withUDP := hiddenProfileConfig()
+	withUDP.Listeners = append(withUDP.Listeners, domain.Listener{ID: "u", Name: "u", Enabled: true, ListenPort: 443, Protocols: []domain.Protocol{domain.ProtocolUDP}, Scheduler: "wrr",
+		Backends: []domain.Backend{{ID: "u-b", Address: "192.0.2.10", Port: 51820, Weight: 1, Enabled: true}}})
+	if _, _, err := s.PublishRevision(ctx, hidden.ID, hidden.Name, "", withUDP, true, "", false); !errors.Is(err, ErrHiddenUDPUnsupported) {
+		t.Fatalf("publish UDP records to a %s node: %v", "2.0.0", err)
+	}
+	heartbeat(domain.HiddenUDPMinAgentVersion)
+	if _, _, err := s.PublishRevision(ctx, hidden.ID, hidden.Name, "", withUDP, true, "", false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDuplicateNamesReturnReadableErrors(t *testing.T) {

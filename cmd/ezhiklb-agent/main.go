@@ -22,7 +22,7 @@ import (
 	"github.com/ezhik-lb/ezhiklb/internal/domain"
 )
 
-const version = "2.0.4"
+const version = "2.0.5"
 
 type client struct {
 	baseURL string
@@ -121,7 +121,7 @@ func main() {
 			// Self-heal the hidden profile's inbound firewall: SSH/panel port
 			// changes and other tools rewriting INPUT are picked up here.
 			hidden, hiddenErr := reconciler.EnsureInputFirewall(ctx)
-			diagnostics.HiddenMode, diagnostics.InputFirewallReady, diagnostics.AllowedInputPorts = hidden.HiddenMode, hidden.InputFirewallReady, hidden.AllowedInputPorts
+			diagnostics.HiddenMode, diagnostics.InputFirewallReady, diagnostics.AllowedInputPorts, diagnostics.AllowedInputUDPPorts = hidden.HiddenMode, hidden.InputFirewallReady, hidden.AllowedInputPorts, hidden.AllowedInputUDPPorts
 			if hiddenErr != nil {
 				logger.Warn("hidden profile inbound firewall", "error", hiddenErr)
 				if diagnostics.Error == "" {

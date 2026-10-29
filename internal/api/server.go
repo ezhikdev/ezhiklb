@@ -282,7 +282,7 @@ func (s *Server) publishProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Profile not found")
 		return
 	}
-	if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) || errors.Is(err, store.ErrHTTPRouteUnsupported) {
+	if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) || errors.Is(err, store.ErrHTTPRouteUnsupported) || errors.Is(err, store.ErrHiddenUDPUnsupported) {
 		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
 		return
 	}
@@ -626,7 +626,7 @@ func (s *Server) assignProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.AssignProfile(r.Context(), r.PathValue("id"), body.ProfileID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Node or profile not found")
-	} else if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) || errors.Is(err, store.ErrHTTPRouteUnsupported) {
+	} else if errors.Is(err, store.ErrRateLimitUnsupported) || errors.Is(err, store.ErrHiddenUnsupported) || errors.Is(err, store.ErrHTTPRouteUnsupported) || errors.Is(err, store.ErrHiddenUDPUnsupported) {
 		writeError(w, http.StatusConflict, "agent_update_required", err.Error())
 	} else if err != nil {
 		s.internalError(w, err)
@@ -693,6 +693,10 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 	}
 	if state.Config.HasHTTPRoutes() && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(agentVersion, domain.HTTPRouteMinAgentVersion) < 0 {
 		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до "+domain.HTTPRouteMinAgentVersion+" перед применением маршрутизации по Host и path")
+		return
+	}
+	if state.Config.HasHiddenUDP() && !state.Decommission && state.UpdateVersion == "" && domain.CompareVersions(agentVersion, domain.HiddenUDPMinAgentVersion) < 0 {
+		writeError(w, http.StatusConflict, "agent_update_required", "Обновите агент ноды до "+domain.HiddenUDPMinAgentVersion+" перед применением UDP-записей скрытого профиля")
 		return
 	}
 	etag := DesiredStateETag(state)
@@ -897,6 +901,6 @@ func sameSecret(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-const Version = "2.0.4"
+const Version = "2.0.5"
 
 func ListenAddress(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

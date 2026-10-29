@@ -332,10 +332,22 @@ func multiportChunks(ports []uint16) []string {
 	return chunks
 }
 
+// hiddenUDPPorts returns the ports of a hidden profile's UDP records. Every
+// UDP service of a hidden state is such a record.
+func hiddenUDPPorts(services []Service) []uint16 {
+	var ports []uint16
+	for _, service := range onlyProtocol(services, domain.ProtocolUDP) {
+		ports = append(ports, service.Port)
+	}
+	return normalizePorts(ports)
+}
+
 // renderInputRules builds the EZHIKLB-INPUT chain. Allowed traffic RETURNs
 // to the host's own INPUT rules (which may restrict it further); the chain
-// only ever narrows what the host accepts and never opens anything.
-func renderInputRules(ports []uint16, ipv6 bool) string {
+// only ever narrows what the host accepts and never opens anything. UDP
+// ports are IPv4 only: IPVS serves hidden UDP records on the IPv4 ingress
+// address, and the filter INPUT hook runs before IPVS takes the packet.
+func renderInputRules(ports, udpPorts []uint16, ipv6 bool) string {
 	lines := []string{"*filter", ":" + inputChain + " - [0:0]", "-F " + inputChain,
 		"-A " + inputChain + " -i lo -j RETURN",
 		"-A " + inputChain + " -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"}
@@ -351,21 +363,30 @@ func renderInputRules(ports []uint16, ipv6 bool) string {
 	for _, chunk := range multiportChunks(ports) {
 		lines = append(lines, "-A "+inputChain+" -p tcp -m multiport --dports "+chunk+" -j RETURN")
 	}
+	if !ipv6 {
+		for _, chunk := range multiportChunks(udpPorts) {
+			lines = append(lines, udpInputRule(chunk))
+		}
+	}
 	lines = append(lines, "-A "+inputChain+" -j DROP", "COMMIT", "")
 	return strings.Join(lines, "\n")
 }
 
-// applyInputFirewall closes every inbound port except the given TCP ports
-// and system traffic. IPv6 is handled best-effort: a host without a usable
+func udpInputRule(chunk string) string {
+	return "-A " + inputChain + " -p udp -m multiport --dports " + chunk + " -j RETURN"
+}
+
+// applyInputFirewall closes every inbound port except the given TCP ports,
+// the hidden UDP record ports and system traffic. IPv6 is handled best-effort: a host without a usable
 // ip6tables keeps its IPv4 protection and reports the IPv6 problem.
-func (r *Reconciler) applyInputFirewall(ctx context.Context, ports []uint16) error {
-	if _, err := r.runner.Run(ctx, "iptables-restore", []string{"--noflush"}, renderInputRules(ports, false)); err != nil {
+func (r *Reconciler) applyInputFirewall(ctx context.Context, ports, udpPorts []uint16) error {
+	if _, err := r.runner.Run(ctx, "iptables-restore", []string{"--noflush"}, renderInputRules(ports, udpPorts, false)); err != nil {
 		return err
 	}
 	if err := r.ensureJumpWith(ctx, "iptables", "filter", "INPUT", inputChain); err != nil {
 		return err
 	}
-	if _, err := r.runner.Run(ctx, "ip6tables-restore", []string{"--noflush"}, renderInputRules(ports, true)); err != nil {
+	if _, err := r.runner.Run(ctx, "ip6tables-restore", []string{"--noflush"}, renderInputRules(ports, nil, true)); err != nil {
 		r.logger.Warn("IPv6 inbound firewall for the hidden profile was not applied", "error", err)
 		return nil
 	}
@@ -385,13 +406,22 @@ func (r *Reconciler) removeInputFirewall(ctx context.Context) error {
 	return nil
 }
 
-// inputFirewallActive reports whether the IPv4 chain and its INPUT jump exist.
-func (r *Reconciler) inputFirewallActive(ctx context.Context) bool {
+// inputFirewallActive reports whether the IPv4 chain and its INPUT jump exist
+// and the chain still lets the hidden UDP ports through.
+func (r *Reconciler) inputFirewallActive(ctx context.Context, udpPorts []uint16) bool {
 	if _, err := r.runner.Run(ctx, "iptables", []string{"-w", "5", "-C", "INPUT", "-j", inputChain}, ""); err != nil {
 		return false
 	}
 	output, err := r.runner.Run(ctx, "iptables", []string{"-w", "5", "-S", inputChain}, "")
-	return err == nil && strings.Contains(output, "-j DROP")
+	if err != nil || !strings.Contains(output, "-j DROP") {
+		return false
+	}
+	for _, chunk := range multiportChunks(udpPorts) {
+		if !strings.Contains(output, udpInputRule(chunk)) {
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureInputFirewall re-asserts a hidden node's inbound firewall. It picks
@@ -406,15 +436,17 @@ func (r *Reconciler) EnsureInputFirewall(ctx context.Context) (domain.NodeDiagno
 		return result, err
 	}
 	result.HiddenMode = true
+	udpPorts := hiddenUDPPorts(state.Services)
+	result.AllowedInputUDPPorts = udpPorts
 	ports, err := r.detectInputPorts(ctx)
 	if err != nil {
 		result.AllowedInputPorts = state.InputPorts
-		result.InputFirewallReady = r.inputFirewallActive(ctx)
+		result.InputFirewallReady = r.inputFirewallActive(ctx, udpPorts)
 		return result, err
 	}
-	if !slices.Equal(ports, state.InputPorts) || !r.inputFirewallActive(ctx) {
-		r.logger.Info("re-applying the hidden profile inbound firewall", "ports", ports)
-		if err := r.applyInputFirewall(ctx, ports); err != nil {
+	if !slices.Equal(ports, state.InputPorts) || !r.inputFirewallActive(ctx, udpPorts) {
+		r.logger.Info("re-applying the hidden profile inbound firewall", "ports", ports, "udp_ports", udpPorts)
+		if err := r.applyInputFirewall(ctx, ports, udpPorts); err != nil {
 			result.AllowedInputPorts = state.InputPorts
 			return result, fmt.Errorf("apply inbound firewall: %w", err)
 		}
@@ -424,7 +456,7 @@ func (r *Reconciler) EnsureInputFirewall(ctx context.Context) (domain.NodeDiagno
 		}
 	}
 	result.AllowedInputPorts = ports
-	result.InputFirewallReady = r.inputFirewallActive(ctx)
+	result.InputFirewallReady = r.inputFirewallActive(ctx, udpPorts)
 	if !result.InputFirewallReady {
 		return result, errors.New("hidden profile inbound firewall is not active")
 	}

@@ -121,6 +121,23 @@ The panel refuses to publish or assign a hidden profile to nodes with an
 agent older than 2.0.0 and the agent API answers 409 to such agents, which
 would otherwise apply the records as ordinary 443 listeners.
 
+Since 2.0.5 a hidden record whose `protocols` is exactly `["udp"]`
+(`domain.HiddenUDP`) is a plain UDP record: `listen_port` must be one of
+`domain.HiddenPorts` (80 or 443), each port has at most one UDP record, and
+`sni`/`match_host`/`path` are ignored (kept so switching the record back to
+TCP loses nothing). `compileServices` turns it into an ordinary IPVS UDP
+service on `INGRESS:port` without an SNI label, so the existing UDP path
+(firewall, SNAT, weights, affinity, health, statistics) applies unchanged and
+HAProxy never sees it; TCP on the same port stays with `fe_ezhiklb.sni`.
+The filter `INPUT` hook runs before IPVS takes a packet, so `EZHIKLB-INPUT`
+gets `-p udp -m multiport --dports <ports> -j RETURN` for the ports of the
+state's UDP services (`hiddenUDPPorts`), IPv4 only because IPVS serves the
+IPv4 ingress address. The ports are derived from `AppliedState.Services`, not
+persisted separately; `inputFirewallActive` also requires the UDP rule, so the
+minute `EnsureInputFirewall` re-applies a chain that lost it, and diagnostics
+report `allowed_input_udp_ports`. Publishing, assigning and the agent API are
+gated on `HiddenUDPMinAgentVersion` (2.0.5) via `ProfileConfig.HasHiddenUDP`.
+
 ### Desired-state identity
 
 Revision numbers are unique only within a profile. Since 2.0 the desired-state
