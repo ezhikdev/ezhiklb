@@ -65,8 +65,12 @@ type Listener struct {
 	// SNI is then compared with the Host header (empty matches any host) and
 	// Path with the request path. CDNs that reach the node over http:// send
 	// no SNI but keep the Host header.
-	MatchHost bool      `json:"match_host,omitempty"`
-	Path      string    `json:"path,omitempty"`
+	MatchHost bool   `json:"match_host,omitempty"`
+	Path      string `json:"path,omitempty"`
+	// MatchPort makes a hidden TCP record the port's fallback: it takes the
+	// TCP on ListenPort (one of HiddenPorts) that no SNI or Host record
+	// matched. SNI, Host and path are then ignored.
+	MatchPort bool      `json:"match_port,omitempty"`
 	Backends  []Backend `json:"backends"`
 }
 
@@ -95,12 +99,23 @@ const HTTPRouteMinAgentVersion = "2.0.3"
 // hidden profile and opens their ports in the inbound firewall.
 const HiddenUDPMinAgentVersion = "2.0.5"
 
+// HiddenTCPPortMinAgentVersion is the first agent that sends unmatched TCP
+// on a hidden port to a port record instead of rejecting it.
+const HiddenTCPPortMinAgentVersion = "2.0.6"
+
 // HiddenUDP reports whether a hidden-profile record forwards plain UDP on its
 // ListenPort (one of HiddenPorts) instead of joining the SNI/Host frontend.
 // UDP has no SNI or Host, so the port alone selects the record; TCP on the
 // same port keeps going to the shared frontend.
 func HiddenUDP(listener Listener) bool {
 	return len(listener.Protocols) == 1 && listener.Protocols[0] == ProtocolUDP
+}
+
+// HiddenTCPPort reports whether a hidden-profile record is the TCP fallback
+// of its ListenPort: connections on that port whose SNI or Host matched no
+// other record go to it instead of being rejected.
+func HiddenTCPPort(listener Listener) bool {
+	return listener.MatchPort && len(listener.Protocols) == 1 && listener.Protocols[0] == ProtocolTCP
 }
 
 var sniLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -160,8 +175,11 @@ func ValidPath(value string) bool {
 
 // RouteLabel identifies a hidden record in statistics and service keys. SNI
 // records keep the bare host name used since 2.0.0; HTTP records become
-// "http://host/path" with "*" for any host.
+// "http://host/path" with "*" for any host; TCP port records "tcp:443".
 func RouteLabel(listener Listener) string {
+	if HiddenTCPPort(listener) {
+		return "tcp:" + strconv.Itoa(int(listener.ListenPort))
+	}
 	if !listener.MatchHost {
 		return NormalizeSNI(listener.SNI)
 	}
@@ -549,6 +567,9 @@ func validateHiddenListener(prefix string, listener Listener, owners map[string]
 	if HiddenUDP(listener) {
 		return validateHiddenUDPListener(prefix, listener, owners)
 	}
+	if HiddenTCPPort(listener) {
+		return validateHiddenTCPPortListener(prefix, listener, owners)
+	}
 	var problems []string
 	valid := true
 	host, path := strings.TrimSpace(listener.SNI), strings.TrimSpace(listener.Path)
@@ -613,6 +634,26 @@ func validateHiddenUDPListener(prefix string, listener Listener, owners map[stri
 	return problems
 }
 
+// validateHiddenTCPPortListener checks a TCP port record of a hidden profile:
+// it listens on one of HiddenPorts, and each port has at most one such record.
+// SNI, Host and path are ignored like in a UDP record.
+func validateHiddenTCPPortListener(prefix string, listener Listener, owners map[string]string) []string {
+	var problems []string
+	if !slices.Contains(HiddenPorts, listener.ListenPort) {
+		problems = append(problems, fmt.Sprintf("%s.listen_port must be %s for a TCP port record in a hidden profile", prefix, hiddenPortList()))
+	} else {
+		key := fmt.Sprintf("tcp/%d", listener.ListenPort)
+		if owner, exists := owners[key]; exists {
+			problems = append(problems, fmt.Sprintf("%s TCP port %d is already used by listener %s", prefix, listener.ListenPort, owner))
+		}
+		owners[key] = listener.ID
+	}
+	if listener.RateLimitEnabled {
+		problems = append(problems, prefix+".rate_limit is not available in a hidden profile")
+	}
+	return problems
+}
+
 func hiddenPortList() string {
 	values := make([]string, 0, len(HiddenPorts))
 	for _, port := range HiddenPorts {
@@ -635,6 +676,20 @@ func (c ProfileConfig) HasHiddenUDP() bool {
 	return false
 }
 
+// HasHiddenTCPPorts reports whether a hidden profile has a TCP port record,
+// which needs agent HiddenTCPPortMinAgentVersion.
+func (c ProfileConfig) HasHiddenTCPPorts() bool {
+	if !c.Hidden {
+		return false
+	}
+	for _, listener := range c.Listeners {
+		if HiddenTCPPort(listener) {
+			return true
+		}
+	}
+	return false
+}
+
 // HasHTTPRoutes reports whether a hidden profile routes any record by HTTP
 // Host or path, which needs agent HTTPRouteMinAgentVersion.
 func (c ProfileConfig) HasHTTPRoutes() bool {
@@ -642,7 +697,7 @@ func (c ProfileConfig) HasHTTPRoutes() bool {
 		return false
 	}
 	for _, listener := range c.Listeners {
-		if listener.MatchHost && !HiddenUDP(listener) {
+		if listener.MatchHost && !HiddenUDP(listener) && !HiddenTCPPort(listener) {
 			return true
 		}
 	}

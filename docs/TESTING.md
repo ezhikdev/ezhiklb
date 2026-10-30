@@ -395,3 +395,28 @@ hidden profile holding one SNI record (`a.test`) and Host records `cdn.test`,
      "Host · HTTP" and "UDP · порт" in one row; a UDP record picks port 80 or
      443, shows a port-taken error, and the rule list shows "UDP · порт 443";
      checked in both themes and at phone width.
+
+## 2.0.6 acceptance checks — TCP port records in hidden profiles
+
+106. Unit tests: a hidden profile accepts TCP port records on 80 and 443 next
+     to SNI, Host and UDP records and ignores their leftover SNI/Host/path;
+     another port, two TCP port records on one port and a rate limit are
+     rejected; the records get route labels `tcp:443`/`tcp:80`; the frontend
+     has `dst_port` rules after every SNI/Host rule and before the reject
+     backends plus the no-SNI accept rule, a profile without port records
+     renders as in 2.0.5; the config passes `haproxy -c` (HAProxy 2.4 on the
+     stand); publishing a port record to a 2.0.5 agent returns
+     `ErrHiddenTCPPortUnsupported`.
+107. Stand (`e2e_tcpport.py`, 20 checks): bad records get `422`; with an SNI
+     record, a Host record, TCP 443/80 port records and UDP 443: a known SNI
+     still reaches its record, an unknown SNI and TLS without SNI reach the
+     TCP 443 record in under 2 s, HTTP with a known Host reaches the Host
+     record, an unknown Host or an SNI domain on 80 reaches the TCP 80 record,
+     TLS with a known SNI on 80 still reaches the SNI record, UDP 443 is
+     unaffected, statistics carry `tcp:443`/`tcp:80`; a silent client on 443
+     gets a server banner after ~5 s; removing the port records restores the
+     TLS alert, `400` and `301`.
+108. UI: the record dialog offers "SNI · TLS", "Host · HTTP", "TCP · порт" and
+     "UDP · порт" (two rows at phone width); a TCP port record picks 80 or
+     443, shows a port-taken error, and the rule list shows "TCP · порт 443";
+     checked in both themes and at phone width.

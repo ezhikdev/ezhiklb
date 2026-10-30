@@ -138,6 +138,23 @@ minute `EnsureInputFirewall` re-applies a chain that lost it, and diagnostics
 report `allowed_input_udp_ports`. Publishing, assigning and the agent API are
 gated on `HiddenUDPMinAgentVersion` (2.0.5) via `ProfileConfig.HasHiddenUDP`.
 
+Since 2.0.6 a hidden record with `protocols: ["tcp"]` and `match_port: true`
+(`domain.HiddenTCPPort`) is the TCP fallback of its port: `listen_port` must
+be one of `domain.HiddenPorts`, each port has at most one such record, and
+`sni`/`match_host`/`path` are ignored like in a UDP record. Its route label
+is `tcp:<port>`. It stays in the shared `fe_ezhiklb.sni` frontend as a
+`PortRoute` service with `Port` set to its own port; `renderSNIFrontend`
+emits `use_backend be_<id> if { dst_port <port> }` after every SNI and Host
+rule and before the reject backends, so it only gets what no other record
+matched. When port records exist the frontend also accepts a complete
+ClientHello without SNI at once (`{ req.ssl_hello_type 1 } !{ req.ssl_sni -m
+found }`; a partial hello still waits because `req.ssl_sni` reports "may
+change"). A silent client is routed after `sniInspectDelay`. With a port-80
+record the http->https redirect for SNI domains is no longer reached on that
+port. Publishing, assigning and the agent API are gated on
+`HiddenTCPPortMinAgentVersion` (2.0.6) via `ProfileConfig.HasHiddenTCPPorts`;
+a 2.0.5 agent would otherwise treat the record as an SNI record without SNI.
+
 ### Desired-state identity
 
 Revision numbers are unique only within a profile. Since 2.0 the desired-state

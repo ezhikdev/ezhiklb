@@ -538,6 +538,8 @@ h3 { font-size: 15px; }
   .profile-card { min-height: 185px; }
   .form-grid, .form-grid--four, .listener-fields, .profile-basics, .profile-versioning { grid-template-columns: 1fr; }
   .rule-row { grid-template-columns: 34px 56px minmax(0, 1fr) auto; }
+  .protocol-toggle.protocol-toggle--kinds { height: auto; grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); border-radius: 21px; }
+  .protocol-toggle--kinds button { height: 36px; }
   .rule-row__main { min-height: 96px; grid-template-columns: 1fr; gap: 9px; padding: 13px; }
   .rule-row__actions { flex-direction: column; padding-right: 5px; }
   .rule-row__actions .button:first-child { display: none; }

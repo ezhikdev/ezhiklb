@@ -125,12 +125,15 @@ func httpConditions(service Service) []string {
 
 // renderSNIFrontend writes the shared hidden-profile entry point. TLS goes to
 // the record whose SNI matches, plain HTTP to the record whose Host and path
-// match; TLS without a matching SNI gets a TLS alert from a strict-sni
-// listener, anything else an HTTP redirect or 400.
+// match; whatever is left on a port with a TCP port record goes to that
+// record. Otherwise TLS without a matching SNI gets a TLS alert from a
+// strict-sni listener, anything else an HTTP redirect or 400.
 func renderSNIFrontend(b *strings.Builder, services []Service, rejectCertificate string) {
-	var tlsRoutes, httpRoutes []Service
+	var tlsRoutes, httpRoutes, portRoutes []Service
 	for _, service := range services {
-		if service.HTTPRoute {
+		if service.PortRoute {
+			portRoutes = append(portRoutes, service)
+		} else if service.HTTPRoute {
 			httpRoutes = append(httpRoutes, service)
 		} else {
 			tlsRoutes = append(tlsRoutes, service)
@@ -151,6 +154,12 @@ func renderSNIFrontend(b *strings.Builder, services []Service, rejectCertificate
 		b.WriteString("  tcp-request content accept if HTTP\n")
 	}
 	b.WriteString("  tcp-request content accept if { req.len gt 0 } !{ req.ssl_hello_type 1 }\n")
+	if len(portRoutes) > 0 {
+		// A complete ClientHello without SNI can still go to a port record:
+		// take it at once instead of after the inspect delay. req.ssl_sni
+		// reports "may change" on a partial hello, so this rule waits too.
+		b.WriteString("  tcp-request content accept if { req.ssl_hello_type 1 } !{ req.ssl_sni -m found }\n")
+	}
 	for _, service := range sniRoutingOrder(tlsRoutes) {
 		fmt.Fprintf(b, "  use_backend be_%s if %s\n", safeHAProxyName(service.ListenerID), sniCondition(service.SNI))
 	}
@@ -158,6 +167,13 @@ func renderSNIFrontend(b *strings.Builder, services []Service, rejectCertificate
 		for _, condition := range httpConditions(service) {
 			fmt.Fprintf(b, "  use_backend be_%s if %s\n", safeHAProxyName(service.ListenerID), condition)
 		}
+	}
+	// Port records come after every SNI and Host route, so they only get
+	// what no other record took, silent connections included once the
+	// inspect delay has passed.
+	slices.SortFunc(portRoutes, func(left, right Service) int { return int(left.Port) - int(right.Port) })
+	for _, service := range portRoutes {
+		fmt.Fprintf(b, "  use_backend be_%s if { dst_port %d }\n", safeHAProxyName(service.ListenerID), service.Port)
 	}
 	fmt.Fprintf(b, "  use_backend %s if { req.ssl_hello_type 1 }\n", sniRejectTLSBackend)
 	fmt.Fprintf(b, "  default_backend %s\n\n", sniRejectHTTPBackend)

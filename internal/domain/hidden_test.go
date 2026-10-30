@@ -177,3 +177,48 @@ func TestHiddenUDPRecordsRejected(t *testing.T) {
 		}
 	}
 }
+
+func hiddenTCPPortListener(id string, port uint16) Listener {
+	l := hiddenListener(id, "")
+	l.ListenPort, l.MatchPort = port, true
+	return l
+}
+
+func TestHiddenTCPPortRecords(t *testing.T) {
+	config := DefaultProfileConfig()
+	config.Hidden = true
+	// One TCP port record per port coexists with SNI, Host and UDP records;
+	// leftover SNI/Host/path values of a port record are not validated.
+	leftover := hiddenTCPPortListener("t80", 80)
+	leftover.SNI, leftover.MatchHost, leftover.Path = "not a host", true, "bad path"
+	config.Listeners = []Listener{hiddenListener("a", "a.example.com"), hiddenTCPPortListener("t443", 443), leftover, hiddenUDPListener("u443", 443)}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("hidden TCP port records rejected: %v", err)
+	}
+	if !config.HasHiddenTCPPorts() || config.HasHTTPRoutes() {
+		t.Fatalf("HasHiddenTCPPorts = %v, HasHTTPRoutes = %v", config.HasHiddenTCPPorts(), config.HasHTTPRoutes())
+	}
+	if label := RouteLabel(config.Listeners[1]); label != "tcp:443" {
+		t.Fatalf("RouteLabel = %q", label)
+	}
+	config.Hidden = false
+	if config.HasHiddenTCPPorts() {
+		t.Fatal("a regular profile reported hidden TCP port records")
+	}
+}
+
+func TestHiddenTCPPortRecordsRejected(t *testing.T) {
+	cases := map[string][]Listener{
+		"other port":     {hiddenTCPPortListener("t", 8443)},
+		"duplicate port": {hiddenTCPPortListener("t1", 443), hiddenTCPPortListener("t2", 443)},
+		"rate limit":     {func() Listener { l := hiddenTCPPortListener("t", 443); l.RateLimitEnabled, l.RateLimitMbps = true, 100; return l }()},
+	}
+	for name, listeners := range cases {
+		config := DefaultProfileConfig()
+		config.Hidden = true
+		config.Listeners = listeners
+		if err := config.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

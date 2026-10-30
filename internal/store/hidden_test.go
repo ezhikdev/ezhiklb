@@ -131,6 +131,18 @@ func TestHiddenProfileRequiresCapableAgents(t *testing.T) {
 	if _, _, err := s.PublishRevision(ctx, hidden.ID, hidden.Name, "", withUDP, true, "", false); err != nil {
 		t.Fatal(err)
 	}
+
+	// So do TCP port records.
+	withPort := hiddenProfileConfig()
+	withPort.Listeners = append(withPort.Listeners, domain.Listener{ID: "p", Name: "p", Enabled: true, ListenPort: 443, Protocols: []domain.Protocol{domain.ProtocolTCP}, Scheduler: "wrr", MatchPort: true,
+		Backends: []domain.Backend{{ID: "p-b", Address: "192.0.2.10", Port: 8443, Weight: 1, Enabled: true}}})
+	if _, _, err := s.PublishRevision(ctx, hidden.ID, hidden.Name, "", withPort, true, "", false); !errors.Is(err, ErrHiddenTCPPortUnsupported) {
+		t.Fatalf("publish a TCP port record to a %s node: %v", domain.HiddenUDPMinAgentVersion, err)
+	}
+	heartbeat(domain.HiddenTCPPortMinAgentVersion)
+	if _, _, err := s.PublishRevision(ctx, hidden.ID, hidden.Name, "", withPort, true, "", false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDuplicateNamesReturnReadableErrors(t *testing.T) {

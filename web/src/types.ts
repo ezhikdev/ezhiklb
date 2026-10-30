@@ -33,6 +33,8 @@ export interface Listener {
   match_host?: boolean
   /** Request path of a match_host record: "/ws" also serves "/ws/…". */
   path?: string
+  /** Hidden TCP record on listen_port (80 or 443) that takes the TCP no SNI or Host record matched. */
+  match_port?: boolean
   backends: Backend[]
 }
 

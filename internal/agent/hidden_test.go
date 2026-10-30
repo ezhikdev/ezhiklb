@@ -160,7 +160,7 @@ func TestHAProxyAcceptsHiddenConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "haproxy.cfg")
-	if err := os.WriteFile(path, []byte(renderHAProxyConfig(compileServices(httpRoutesConfig(), "127.0.0.1"), certificate)), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(renderHAProxyConfig(compileServices(portRoutesConfig(), "127.0.0.1"), certificate)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if output, err := exec.Command(haproxy, "-c", "-f", path).CombinedOutput(); err != nil {
@@ -406,5 +406,49 @@ func TestParseHAProxyStatsLabelsHiddenRecords(t *testing.T) {
 	}
 	if len(stats) != 2 || stats[0].SNI != "vpn.example.org" || stats[1].SNI != "*.example.org" {
 		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+// portRoutesConfig adds a TCP port record on each hidden port to httpRoutesConfig.
+func portRoutesConfig() domain.ProfileConfig {
+	config := httpRoutesConfig()
+	port := func(id string, number uint16) domain.Listener {
+		return domain.Listener{ID: id, Name: id, Enabled: true, ListenPort: number, Protocols: []domain.Protocol{domain.ProtocolTCP}, Scheduler: "wrr", MatchPort: true, SNI: "ignored.example.org",
+			Backends: []domain.Backend{{ID: id + "-1", Address: "192.0.2.30", Port: number, Weight: 1, Enabled: true}}}
+	}
+	config.Listeners = append(config.Listeners, port("any443", 443), port("any80", 80))
+	return config
+}
+
+func TestRenderHiddenTCPPortRecords(t *testing.T) {
+	services := compileServices(portRoutesConfig(), "198.51.100.10")
+	rendered := renderHAProxyConfig(services, "/tmp/reject.pem")
+	for _, expected := range []string{
+		"tcp-request content accept if { req.ssl_hello_type 1 } !{ req.ssl_sni -m found }\n",
+		"use_backend be_any80 if { dst_port 80 }\n", "use_backend be_any443 if { dst_port 443 }\n",
+		"backend be_any443\n", "server srv_any443-1 192.0.2.30:443 weight 1",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("config does not contain %q:\n%s", expected, rendered)
+		}
+	}
+	order := []string{"be_exact if", "be_anyws if", "be_any80 if", "be_any443 if", "be_ezhiklb.reject-tls if"}
+	for i := 1; i < len(order); i++ {
+		if strings.Index(rendered, order[i-1]) > strings.Index(rendered, order[i]) {
+			t.Fatalf("%q must come before %q:\n%s", order[i-1], order[i], rendered)
+		}
+	}
+	if strings.Contains(rendered, "ignored.example.org") || strings.Contains(rendered, "frontend fe_any") || strings.Contains(rendered, "tcp:443") {
+		t.Fatalf("a port record leaked its SNI or got its own frontend:\n%s", rendered)
+	}
+	labels := map[string]uint16{}
+	for _, service := range services {
+		labels[service.SNI] = service.Port
+	}
+	if labels["tcp:443"] != 443 || labels["tcp:80"] != 80 {
+		t.Fatalf("port record labels = %#v", labels)
+	}
+	if strings.Contains(renderHAProxyConfig(compileServices(httpRoutesConfig(), "198.51.100.10"), "/tmp/reject.pem"), "dst_port") {
+		t.Fatal("a profile without port records must keep the 2.0.5 frontend")
 	}
 }

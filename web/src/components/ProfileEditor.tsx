@@ -17,16 +17,22 @@ export const hiddenPorts = [80, 443] as const
 /** Mirrors domain.HiddenUDP: a hidden record that forwards plain UDP on its own port. */
 export const isHiddenUDP = (listener: Listener) => listener.protocols.length === 1 && listener.protocols[0] === "udp"
 
+/** Mirrors domain.HiddenTCPPort: a hidden TCP record that takes what no SNI or Host record matched on its port. */
+export const isHiddenTCPPort = (listener: Listener) => Boolean(listener.match_port) && listener.protocols.length === 1 && listener.protocols[0] === "tcp"
+
+/** A hidden record bound to one port: UDP or a TCP port record. */
+const isHiddenPortRecord = (listener: Listener) => isHiddenUDP(listener) || isHiddenTCPPort(listener)
+
 const newBackend = (): Backend => ({ id: makeID("bck"), address: "", port: 8080, weight: 1, enabled: true })
 const newListener = (hidden: boolean): Listener => hidden
   ? { id: makeID("lst"), name: "Новая запись", enabled: true, listen_address: "0.0.0.0", listen_port: 443, protocols: ["tcp"], scheduler: "wrr", affinity_seconds: 0, rate_limit_enabled: false, rate_limit_mbps: 0, sni: "", backends: [{ ...newBackend(), port: 443 }] }
   : { id: makeID("lst"), name: "Новая запись", enabled: true, listen_address: "0.0.0.0", listen_port: 8000, protocols: ["udp"], scheduler: "wrr", affinity_seconds: 0, rate_limit_enabled: false, rate_limit_mbps: 0, backends: [newBackend()] }
 
 /** Brings records to the fixed socket of a hidden profile; SNI values are kept.
- * A UDP-only record on 80 or 443 stays a UDP record, everything else joins the TCP frontend. */
+ * A UDP-only or TCP port record on 80 or 443 keeps its port, everything else joins the TCP frontend on 443. */
 export function toHiddenListener(listener: Listener): Listener {
-  const udp = isHiddenUDP(listener) && (hiddenPorts as readonly number[]).includes(listener.listen_port)
-  return { ...listener, listen_address: "0.0.0.0", listen_port: udp ? listener.listen_port : 443, protocols: udp ? ["udp"] : ["tcp"], rate_limit_enabled: false, rate_limit_mbps: 0 }
+  const keepPort = isHiddenPortRecord(listener) && (hiddenPorts as readonly number[]).includes(listener.listen_port)
+  return { ...listener, listen_address: "0.0.0.0", listen_port: keepPort ? listener.listen_port : 443, protocols: isHiddenUDP(listener) && keepPort ? ["udp"] : ["tcp"], rate_limit_enabled: false, rate_limit_mbps: 0 }
 }
 
 type ListenerErrors = Record<string, string>
@@ -70,12 +76,14 @@ export const isValidPath = (value: string) => {
 
 /** Mirrors domain.RouteLabel: the key a hidden record has in statistics. */
 export function routeLabel(listener: Listener) {
+  if (isHiddenTCPPort(listener)) return `tcp:${listener.listen_port}`
   if (!listener.match_host) return normalizeSNI(listener.sni ?? "")
   return `http://${normalizeSNI(listener.sni ?? "") || "*"}${normalizePath(listener.path ?? "")}`
 }
 
 /** Human-readable route of a hidden record for lists and tables. */
 export function routeTitle(listener: Listener) {
+  if (isHiddenTCPPort(listener)) return `весь остальной TCP · ${listener.listen_port}`
   if (!listener.match_host) return normalizeSNI(listener.sni ?? "")
   const host = normalizeSNI(listener.sni ?? ""), path = normalizePath(listener.path ?? "")
   return host ? `${host}${path}` : `любой Host · ${path}`
@@ -90,21 +98,26 @@ function routeErrors(listener: Listener, others: Listener[]): ListenerErrors {
     if (host && !isValidSNI(host)) errors.sni = "Домен вида cdn.example.com или *.example.com — или оставьте пустым для любого Host"
     if (path && !isValidPath(path)) errors.path = "Начинается с /, без пробелов, кавычек, ? и #"
   } else if (!isValidSNI(host)) errors.sni = "Укажите домен, например vpn.example.com или *.example.com"
-  if (Object.keys(errors).length === 0 && others.some((candidate) => routeLabel(candidate) === routeLabel(listener))) errors[listener.match_host && path ? "path" : "sni"] = "Такой маршрут уже используется другой записью"
+  if (Object.keys(errors).length === 0 && others.some((candidate) => !isHiddenPortRecord(candidate) && routeLabel(candidate) === routeLabel(listener))) errors[listener.match_host && path ? "path" : "sni"] = "Такой маршрут уже используется другой записью"
   return errors
 }
 
-/** Port error of a hidden UDP record: one of hiddenPorts, at most one UDP record per port. */
-function hiddenUDPPortError(listener: Listener, others: Listener[]) {
-  if (!(hiddenPorts as readonly number[]).includes(listener.listen_port)) return `UDP-запись слушает только ${hiddenPorts.join(" или ")}`
-  return others.some((candidate) => isHiddenUDP(candidate) && candidate.listen_port === listener.listen_port) ? `UDP ${listener.listen_port} уже занят другой записью` : ""
+/** Port error of a hidden UDP or TCP port record: one of hiddenPorts, at most one record of a kind per port. */
+function hiddenPortError(listener: Listener, others: Listener[]) {
+  const [kind, same] = isHiddenUDP(listener) ? ["UDP", isHiddenUDP] : ["TCP", isHiddenTCPPort]
+  if (!(hiddenPorts as readonly number[]).includes(listener.listen_port)) return `${kind}-запись по порту слушает только ${hiddenPorts.join(" или ")}`
+  return others.some((candidate) => same(candidate) && candidate.listen_port === listener.listen_port) ? `${kind} ${listener.listen_port} уже занят другой записью по порту` : ""
 }
+
+/** First hidden port without a record of the same kind (UDP or TCP port). */
+const freeHiddenPort = (same: (listener: Listener) => boolean, others: Listener[]) =>
+  hiddenPorts.find((port) => !others.some((item) => same(item) && item.listen_port === port)) ?? hiddenPorts[hiddenPorts.length - 1]
 
 function validateListener(listener: Listener, others: Listener[], hidden: boolean): ListenerErrors {
   const errors: ListenerErrors = {}
   if (!listener.name.trim()) errors.name = "Укажите название записи"
-  if (hidden && isHiddenUDP(listener)) {
-    const portError = hiddenUDPPortError(listener, others)
+  if (hidden && isHiddenPortRecord(listener)) {
+    const portError = hiddenPortError(listener, others)
     if (portError) errors.listen_port = portError
   } else if (hidden) {
     Object.assign(errors, routeErrors(listener, others))
@@ -134,8 +147,8 @@ export function hiddenProblems(config: ProfileConfig): string[] {
   const seen = new Map<string, string>()
   const problems: string[] = []
   for (const [index, listener] of config.listeners.entries()) {
-    if (isHiddenUDP(listener)) {
-      const portError = hiddenUDPPortError(listener, config.listeners.slice(0, index))
+    if (isHiddenPortRecord(listener)) {
+      const portError = hiddenPortError(listener, config.listeners.slice(0, index))
       if (portError) problems.push(`«${listener.name}»: ${portError}`)
       continue
     }
@@ -166,7 +179,7 @@ export function ProfileEditor({ value, health, nodeAddresses, onChange }: { valu
     const clone = structuredClone(listener)
     clone.id = makeID("lst")
     clone.name = `${listener.name} — копия`
-    if (hidden && isHiddenUDP(clone)) clone.listen_port = hiddenPorts.find((port) => !config.listeners.some((item) => isHiddenUDP(item) && item.listen_port === port)) ?? clone.listen_port
+    if (hidden && isHiddenPortRecord(clone)) clone.listen_port = freeHiddenPort(isHiddenUDP(clone) ? isHiddenUDP : isHiddenTCPPort, config.listeners)
     else if (hidden) { clone.sni = ""; if (clone.match_host) clone.path = "" }
     else clone.listen_port = Math.min(65535, listener.listen_port + 1)
     clone.backends = clone.backends.map((backend) => ({ ...backend, id: makeID("bck") }))
@@ -189,12 +202,12 @@ export function ProfileEditor({ value, health, nodeAddresses, onChange }: { valu
     </Card>
 
     <div className="section-heading">
-      <div><p className="eyebrow">{hidden ? `Маршрутизация по SNI и Host · TCP ${hiddenPorts.join(" + ")} · UDP по порту` : "Маршрутизация"}</p><h3>{config.listeners.length} записей · {totalBackends} выходов</h3></div>
+      <div><p className="eyebrow">{hidden ? `Маршрутизация по SNI и Host · TCP ${hiddenPorts.join(" + ")} · TCP и UDP по порту` : "Маршрутизация"}</p><h3>{config.listeners.length} записей · {totalBackends} выходов</h3></div>
       <Button variant="secondary" onClick={() => setEditing({ listener: newListener(hidden), index: null })}><Plus data-icon="inline-start" />Добавить запись</Button>
     </div>
 
     {config.listeners.length === 0
-      ? <div className="inline-empty"><Server /><div><strong>Записей пока нет</strong><span>{hidden ? "Добавьте домен (SNI), Host/path или UDP-порт и хотя бы один выход." : "Добавьте входной порт и хотя бы один backend."}</span></div></div>
+      ? <div className="inline-empty"><Server /><div><strong>Записей пока нет</strong><span>{hidden ? "Добавьте домен (SNI), Host/path, TCP- или UDP-порт и хотя бы один выход." : "Добавьте входной порт и хотя бы один backend."}</span></div></div>
       : <RuleList listeners={config.listeners} hidden={hidden}
           onToggle={(index, enabled) => onChange({ ...config, listeners: config.listeners.map((item, itemIndex) => itemIndex === index ? { ...item, enabled } : item) })}
           onEdit={(index) => setEditing({ listener: structuredClone(config.listeners[index]), index })}
@@ -228,14 +241,15 @@ function RuleRow({ listener, hidden, onToggle, onEdit, onClone, onRemove, dragHa
   const enabledBackends = listener.backends.filter((backend) => backend.enabled)
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
   const udp = hidden && isHiddenUDP(listener)
-  const routeValid = !hidden || udp || Object.keys(routeErrors(listener, [])).length === 0
+  const tcpPort = hidden && isHiddenTCPPort(listener)
+  const routeValid = !hidden || udp || tcpPort || Object.keys(routeErrors(listener, [])).length === 0
   return <Card className={`rule-row ${listener.enabled ? "" : "rule-row--disabled"} ${routeValid ? "" : "rule-row--invalid"}`}>
     <button type="button" className="rule-row__handle" aria-label={`Изменить порядок: ${listener.name}`} title="Перетащите, чтобы изменить порядок в списке"
       {...dragHandleProps}><GripVertical /></button>
     <div className="rule-row__toggle"><Switch label={`${listener.enabled ? "Выключить" : "Включить"} ${listener.name}`} checked={listener.enabled} onChange={onToggle} /></div>
     <button type="button" className="rule-row__main" onClick={onEdit}>
-      <div className="rule-row__name"><strong>{listener.name}</strong><span>{udp ? `UDP · порт ${listener.listen_port}` : hidden ? `${listener.match_host ? "HTTP" : "SNI"} · TCP ${hiddenPorts.join(" + ")}` : listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}{!hidden && listener.rate_limit_enabled ? ` · ≤ ${listener.rate_limit_mbps} Мбит/с` : ""}</span></div>
-      <div className="rule-route mono">{udp ? <span>UDP {listener.listen_port}</span> : hidden ? <span className={`sni-chip ${routeValid ? "" : "sni-chip--missing"}`}><Globe />{routeValid ? routeTitle(listener) : listener.match_host ? "Host и path не указаны" : "SNI не указан"}</span> : <span>{listener.listen_address}:{listener.listen_port}</span>}<ArrowRight /><span>{enabledBackends.length} {enabledBackends.length === 1 ? "выход" : "выхода"}</span></div>
+      <div className="rule-row__name"><strong>{listener.name}</strong><span>{udp ? `UDP · порт ${listener.listen_port}` : tcpPort ? `TCP · порт ${listener.listen_port}` : hidden ? `${listener.match_host ? "HTTP" : "SNI"} · TCP ${hiddenPorts.join(" + ")}` : listener.protocols.map((item) => item.toUpperCase()).join(" + ")} · {listener.scheduler.toUpperCase()}{!hidden && listener.rate_limit_enabled ? ` · ≤ ${listener.rate_limit_mbps} Мбит/с` : ""}</span></div>
+      <div className="rule-route mono">{udp ? <span>UDP {listener.listen_port}</span> : tcpPort ? <span>TCP {listener.listen_port} · остальное</span> : hidden ? <span className={`sni-chip ${routeValid ? "" : "sni-chip--missing"}`}><Globe />{routeValid ? routeTitle(listener) : listener.match_host ? "Host и path не указаны" : "SNI не указан"}</span> : <span>{listener.listen_address}:{listener.listen_port}</span>}<ArrowRight /><span>{enabledBackends.length} {enabledBackends.length === 1 ? "выход" : "выхода"}</span></div>
       <div className="rule-targets">{enabledBackends.slice(0, 2).map((backend) => <span key={backend.id}>{backend.address}:{backend.port} · {totalWeight ? Math.round(backend.weight / totalWeight * 100) : 0}%</span>)}{enabledBackends.length > 2 && <span>+ ещё {enabledBackends.length - 2}</span>}</div>
     </button>
     <div className="rule-row__actions">
@@ -247,10 +261,12 @@ function RuleRow({ listener, hidden, onToggle, onEdit, onClone, onRemove, dragHa
 }
 
 /** Normalizes the route of a hidden record; an SNI record never keeps a path.
- * A UDP record keeps its SNI/Host/path untouched so switching back loses nothing. */
+ * UDP and TCP port records keep their SNI/Host/path untouched so switching back loses nothing. */
 function hiddenRecord(listener: Listener): Listener {
-  if (isHiddenUDP(listener)) return { ...listener, name: listener.name.trim() }
-  const { path, match_host, ...rest } = listener
+  if (isHiddenTCPPort(listener)) return { ...listener, name: listener.name.trim() }
+  const { match_port: _matchPort, ...unported } = listener
+  if (isHiddenUDP(unported)) return { ...unported, name: listener.name.trim() }
+  const { path, match_host, ...rest } = unported
   const record: Listener = { ...rest, name: listener.name.trim(), sni: normalizeSNI(listener.sni ?? "") }
   if (match_host) Object.assign(record, { match_host: true, path: normalizePath(path ?? "") })
   return record
@@ -274,29 +290,31 @@ function ListenerDialog({ initial, hidden, others, health, nodeAddresses, onSave
   const totalWeight = enabledBackends.reduce((sum, backend) => sum + backend.weight, 0)
   const matchHost = Boolean(listener.match_host)
   const udp = hidden && isHiddenUDP(listener)
-  const freeUDPPort = hiddenPorts.find((port) => !others.some((item) => isHiddenUDP(item) && item.listen_port === port)) ?? hiddenPorts[hiddenPorts.length - 1]
-  const recordKinds = [["sni", "SNI · TLS"], ["host", "Host · HTTP"], ["udp", "UDP · порт"]] as const
-  const recordKind = udp ? "udp" : matchHost ? "host" : "sni"
+  const tcpPort = hidden && isHiddenTCPPort(listener)
+  const recordKinds = [["sni", "SNI · TLS"], ["host", "Host · HTTP"], ["tcp", "TCP · порт"], ["udp", "UDP · порт"]] as const
+  const recordKind = udp ? "udp" : tcpPort ? "tcp" : matchHost ? "host" : "sni"
   const setRecordKind = (kind: typeof recordKinds[number][0]) => {
-    if (kind === "udp") patch({ protocols: ["udp"], listen_port: udp ? listener.listen_port : freeUDPPort })
-    else patch({ protocols: ["tcp"], listen_port: 443, match_host: kind === "host" })
+    if (kind === "udp") patch({ protocols: ["udp"], match_port: false, listen_port: udp ? listener.listen_port : freeHiddenPort(isHiddenUDP, others) })
+    else if (kind === "tcp") patch({ protocols: ["tcp"], match_port: true, listen_port: tcpPort ? listener.listen_port : freeHiddenPort(isHiddenTCPPort, others) })
+    else patch({ protocols: ["tcp"], match_port: false, listen_port: 443, match_host: kind === "host" })
     setErrors({})
   }
+  const portKind = udp ? "UDP" : "TCP"
 
-  return <Dialog wide title={initial.name === "Новая запись" ? "Новая запись" : `Редактирование · ${initial.name}`} description={udp ? "Весь UDP на выбранном порту уходит на выходы записи — без SNI и Host." : hidden ? "Домен (SNI) или Host и path определяют, на какие выходы уйдёт подключение." : "Настройте входящий трафик и распределение между выходами."} onClose={close}>
+  return <Dialog wide title={initial.name === "Новая запись" ? "Новая запись" : `Редактирование · ${initial.name}`} description={udp ? "Весь UDP на выбранном порту уходит на выходы записи — без SNI и Host." : tcpPort ? "TCP на выбранном порту, который не подошёл ни под одну SNI- или Host-запись, уходит на выходы записи." : hidden ? "Домен (SNI) или Host и path определяют, на какие выходы уйдёт подключение." : "Настройте входящий трафик и распределение между выходами."} onClose={close}>
     <div className="dialog__body listener-dialog-body">
       <div className="listener-status-line"><Switch label="Включить запись" checked={listener.enabled} onChange={(enabled) => patch({ enabled })} /><div><strong>{listener.enabled ? "Запись включена" : "Запись выключена"}</strong><span>Изменение вступит в силу после публикации профиля.</span></div></div>
       {hidden ? <>
-        <div className="form-grid">
-          <Field label="Название" error={errors.name}><Input value={listener.name} aria-invalid={Boolean(errors.name)} onChange={(e) => patch({ name: e.target.value })} /></Field>
-          <Field label="Сопоставлять по" hint={udp ? "UDP на порту ноды, без разбора содержимого" : matchHost ? "Заголовок Host и путь незашифрованного HTTP" : "Имя сервера из TLS ClientHello"}><div className="protocol-toggle" role="group" aria-label="Сопоставлять по">{recordKinds.map(([kind, label]) => <button type="button" key={kind} aria-pressed={recordKind === kind} onClick={() => setRecordKind(kind)}>{label}</button>)}</div></Field>
-        </div>
-        {udp ? <Field label="Порт UDP" hint="На каждый порт — не больше одной UDP-записи" error={errors.listen_port}><div className="protocol-toggle" role="group" aria-label="Порт UDP">{hiddenPorts.map((port) => <button type="button" key={port} aria-pressed={listener.listen_port === port} onClick={() => { patch({ listen_port: port }); setErrors({}) }}>{port}</button>)}</div></Field> : matchHost ? <div className="form-grid">
+        <Field label="Название" error={errors.name}><Input value={listener.name} aria-invalid={Boolean(errors.name)} onChange={(e) => patch({ name: e.target.value })} /></Field>
+        <Field label="Сопоставлять по" hint={udp ? "UDP на порту ноды, без разбора содержимого" : tcpPort ? "TCP на порту ноды, не подошедший под SNI- и Host-записи" : matchHost ? "Заголовок Host и путь незашифрованного HTTP" : "Имя сервера из TLS ClientHello"}><div className="protocol-toggle protocol-toggle--kinds" role="group" aria-label="Сопоставлять по">{recordKinds.map(([kind, label]) => <button type="button" key={kind} aria-pressed={recordKind === kind} onClick={() => setRecordKind(kind)}>{label}</button>)}</div></Field>
+        {udp || tcpPort ? <Field label={`Порт ${portKind}`} hint={`На каждый порт — не больше одной ${portKind}-записи по порту`} error={errors.listen_port}><div className="protocol-toggle" role="group" aria-label={`Порт ${portKind}`}>{hiddenPorts.map((port) => <button type="button" key={port} aria-pressed={listener.listen_port === port} onClick={() => { patch({ listen_port: port }); setErrors({}) }}>{port}</button>)}</div></Field> : matchHost ? <div className="form-grid">
           <Field label="Host (домен)" hint="Пусто — любой Host. Маска *.example.com допустима" error={errors.sni}><Input className="input mono" placeholder="любой" spellCheck={false} autoCapitalize="off" value={listener.sni ?? ""} aria-invalid={Boolean(errors.sni)} onChange={(e) => patch({ sni: e.target.value })} /></Field>
           <Field label="Path" hint="Пусто — любой путь. /ws также ловит /ws/…" error={errors.path}><Input className="input mono" placeholder="/ws" spellCheck={false} autoCapitalize="off" value={listener.path ?? ""} aria-invalid={Boolean(errors.path)} onChange={(e) => patch({ path: e.target.value })} /></Field>
         </div> : <Field label="SNI (домен)" hint="Точное имя или маска *.example.com — совпадение без учёта регистра" error={errors.sni}><Input className="input mono" placeholder="vpn.example.com" spellCheck={false} autoCapitalize="off" value={listener.sni ?? ""} aria-invalid={Boolean(errors.sni)} onChange={(e) => patch({ sni: e.target.value })} /></Field>}
-        <div className="hidden-socket-note"><Lock /><div><strong>{udp ? `Вход: UDP ${listener.listen_port} на IPv4 ноды` : `Вход: TCP ${hiddenPorts.join(" и ")} на IPv4 ноды`}</strong><span>{udp
+        <div className="hidden-socket-note"><Lock /><div><strong>{udp ? `Вход: UDP ${listener.listen_port} на IPv4 ноды` : tcpPort ? `Вход: TCP ${listener.listen_port} на IPv4 ноды` : `Вход: TCP ${hiddenPorts.join(" и ")} на IPv4 ноды`}</strong><span>{udp
           ? `Каждый UDP-пакет на порт ${listener.listen_port} уходит на выходы ниже через IPVS — SNI, Host и path не проверяются. TCP ${listener.listen_port} по-прежнему обслуживают SNI- и Host-записи. Порт открывается во входящем firewall ноды только для IPv4.`
+          : tcpPort
+          ? `SNI- и Host-записи проверяются первыми и работают как раньше. Всё, что на TCP ${listener.listen_port} не подошло ни под одну из них — TLS с другим SNI или без SNI, HTTP с другим Host, любой другой протокол, — уходит на выходы ниже вместо отказа. Подключения, где клиент молчит и ждёт сервера, попадают сюда через 5 секунд ожидания.`
           : matchHost
           ? "Только незашифрованный HTTP (например, CDN ходит на ноду по http://): запрос с подходящими Host и path уйдёт на выходы ниже. Нужен хотя бы Host или path. В TLS путь не виден — такие подключения сопоставляются только по SNI."
           : "Подключение с этим SNI уйдёт на выходы ниже по выбранному планировщику. Без SNI или с чужим SNI соединение не проксируется и получает ошибку."}</span></div></div>

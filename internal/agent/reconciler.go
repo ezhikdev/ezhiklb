@@ -54,11 +54,13 @@ type Service struct {
 	// SNI marks a hidden-profile record served by the shared SNI frontend on
 	// domain.HiddenPorts; Port then only labels statistics (443). It holds
 	// domain.RouteLabel, so for an HTTP record it is "http://host/path".
+	// A PortRoute record takes the unmatched TCP on Port ("tcp:443").
 	SNI string `json:"sni,omitempty"`
 	// HTTPRoute records match plain HTTP by Host (empty: any) and Path.
 	HTTPRoute    bool          `json:"http_route,omitempty"`
 	Host         string        `json:"host,omitempty"`
 	Path         string        `json:"path,omitempty"`
+	PortRoute    bool          `json:"port_route,omitempty"`
 	Destinations []Destination `json:"destinations"`
 }
 
@@ -582,7 +584,10 @@ func compileServices(config domain.ProfileConfig, vip string) []Service {
 			// Hidden records always listen on the node's ingress address; the
 			// shared SNI frontend serves them on every domain.HiddenPorts port.
 			service := Service{Protocol: domain.ProtocolTCP, Address: vip, Port: domain.HiddenPorts[len(domain.HiddenPorts)-1], Scheduler: listener.Scheduler, AffinitySecs: listener.AffinitySecs, ListenerID: listener.ID, SNI: domain.RouteLabel(listener)}
-			if listener.MatchHost {
+			if domain.HiddenTCPPort(listener) {
+				// A port record takes what no route matched on its own port.
+				service.Port, service.PortRoute = listener.ListenPort, true
+			} else if listener.MatchHost {
 				service.HTTPRoute, service.Host, service.Path = true, domain.NormalizeSNI(listener.SNI), domain.NormalizePath(listener.Path)
 			}
 			for _, backend := range listener.Backends {
